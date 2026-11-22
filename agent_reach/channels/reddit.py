@@ -33,7 +33,7 @@ class RedditChannel(Channel):
     level = "optional"
     login_url = "https://www.reddit.com/login/"
     tools = ("opencli",)
-    prereqs = ("node", "chrome")
+    prereqs = ("node",)
 
     def setup_problems(self):
         from agent_reach.runtime.browser_binding import setup_problems

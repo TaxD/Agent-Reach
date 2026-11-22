@@ -103,7 +103,7 @@ def fresh_check(channel: str, check: Optional[dict]) -> bool:
 def channel_tools(ch) -> List[str]:
     """Everything `add` installs for the channel, prerequisites first."""
     names = (["node", "opencli"] if _uses_browser(ch) else []) + list(ch.prereqs) + list(ch.tools)
-    return list(dict.fromkeys(names))
+    return [n for n in dict.fromkeys(names) if n in tools.TOOLS]
 
 
 def site_domains(ch) -> List[str]:

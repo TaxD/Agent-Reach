@@ -30,7 +30,7 @@ class TwitterChannel(Channel):
     level = "experimental"
     login_url = "https://x.com/i/flow/login"
     tools = ("opencli",)
-    prereqs = ("node", "chrome")
+    prereqs = ("node",)
 
     def setup_problems(self):
         from agent_reach.runtime.browser_binding import setup_problems

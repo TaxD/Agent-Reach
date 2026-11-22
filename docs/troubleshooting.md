@@ -16,7 +16,7 @@ agent-reach check <채널> --text      # 채널 하나를 실측
 
 | 코드 | 의미 | 대응 |
 |---|---|---|
-| `NEED_SETUP` | 도구, 키, 브라우저 연결이 없음 | `agent-reach doctor --text`로 채널의 문제를 확인하고, `agent-reach add <채널>`로 도구를 설치 |
+| `NEED_SETUP` | 도구나 키가 없거나 로그인 채널이 켜져 있지 않음 | `agent-reach doctor --text`로 확인. 로그인 채널은 사용자가 원할 때 `agent-reach add <채널>` |
 | `NEED_LOGIN` | 로그인이 없거나 만료됨 | 사용자가 `agent-reach login <채널>`로 직접 로그인. 연결 오류나 플랫폼 인증 오류를 고치려고 자격 증명을 삭제하지 말 것 |
 | `UPSTREAM_BROKEN` | 상위 도구나 플랫폼의 실패 | 반복 재시도하지 말 것. 나중에 다시 시도하고 `agent-reach check <채널>`로 확인 |
 | `TIMEOUT` | 시간 안에 응답이 없음 | 나중에 다시 시도하거나 `--timeout 초`를 늘림. 제한된 네트워크에서는 프록시 설정(아래) |
@@ -43,17 +43,13 @@ agent-reach check <채널> --text      # 채널 하나를 실측
 
 ## 전용 브라우저 (reddit, twitter)
 
-- 전용 브라우저는 설치되어 있는 Google Chrome을 사용합니다. Chrome이 없으면 `NEED_SETUP`이 반환되므로 사용자가 Chrome을 설치한 뒤 `agent-reach browser setup`을 실행합니다.
-- `login <채널>`은 전용 창을 열고, 사용자가 그 창에서 로그인합니다. 평소 사용하는 Chrome의 로그인은 자동으로 가져오지 않습니다. 가져오려면 사용자가 명시적으로 `agent-reach login <채널> --import-existing`을 실행해야 합니다.
-- 확장 프로그램 설치가 `checksum` 오류로 실패하면, 고정된 릴리스 파일이 바뀌었거나 다운로드가 변조된 것입니다. 반복 재시도하지 말고 이슈로 알려 주십시오.
-
-## 브라우저 포트
-
-전용 브라우저는 기본으로 CDP 포트 9222를 사용합니다. 다른 도구가 이미 9222를 사용 중이면 `Port 9222 belongs to an unmanaged browser` 오류가 납니다. 그 도구를 닫지 말고 Agent Reach의 포트를 옮기십시오.
-
-```bash
-agent-reach configure browser-port 9333
-```
+- 로그인 채널은 `agent-reach add <채널>`로 켜야 동작합니다. 켜지 않은 상태의 사이트 동작은 `NEED_SETUP`을 반환합니다.
+- Google Chrome과 Node.js 20.18.1 이상이 설치되어 있어야 합니다. 없으면 `NEED_SETUP`이 반환되므로 사용자가 직접 설치합니다. macOS와 Linux만 지원합니다.
+- 전용 브라우저의 창은 항상 보이며, 10분간 사용하지 않으면 닫힙니다. `agent-reach browser status`의 `debugging_port`는 항상 `null`입니다(네트워크 포트를 열지 않습니다).
+- `login <채널>`은 전용 창에 로그인 페이지를 열고, 사용자가 그 창에서 로그인합니다. 다른 브라우저의 로그인을 가져오는 기능은 없습니다.
+- `Another OpenCLI daemon is already using port 19825`: 사용자가 따로 실행한 OpenCLI나 다른 프로그램이 포트를 쓰고 있습니다. Reach는 그 프로그램에 아무것도 보내지 않으므로, 사용자가 직접 종료한 뒤 다시 시도합니다.
+- 확장 프로그램 설치가 `checksum` 오류로 실패하면 고정된 릴리스 파일이 바뀌었거나 다운로드가 변조된 것입니다. 반복 재시도하지 말고 이슈로 알려 주십시오.
+- 브라우저가 열리지 않으면 `~/.agent-reach/browser/watcher.log`의 마지막 줄을 확인합니다.
 
 ## 프록시
 
@@ -63,7 +59,7 @@ agent-reach configure browser-port 9333
 agent-reach configure proxy
 ```
 
-셸에 설정된 `HTTPS_PROXY`가 우선합니다. `rss fetch`는 접속 주소를 검증해야 하므로 프록시를 거치지 않고 직접 접속합니다.
+셸에 설정된 `HTTPS_PROXY`가 우선합니다. `rss fetch`는 접속 주소를 검증해야 하므로 프록시를 거치지 않고 직접 접속합니다. 프록시를 사용하는 동안에는 접속 주소 고정 방어가 적용되지 않습니다([SECURITY.md](../SECURITY.md) 참고).
 
 ## AI가 스킬을 인식하지 못할 때
 
@@ -72,7 +68,7 @@ agent-reach configure proxy
 ## 이전 버전으로 되돌리기
 
 ```bash
-uv tool install --force git+https://github.com/TaxD/Agent-Reach@<이전 태그 또는 커밋>
+uv tool install --force git+https://github.com/TaxD/Agent-Reach@<이전 커밋 해시>
 ```
 
 ```bash
