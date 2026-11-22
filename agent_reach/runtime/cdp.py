@@ -202,9 +202,8 @@ class ControlServer:
     def _serve(self, client: socket.socket) -> None:
         with client:
             try:
-                uid = _peer_uid(client)
-                if uid is not None and uid != os.getuid():
-                    return  # only this user's processes are answered
+                if _peer_uid(client) != os.getuid():
+                    return  # only this user's processes are answered; an unknown peer is refused
                 client.settimeout(5)
                 buf = b""
                 while not buf.endswith(b"\n") and len(buf) <= _MAX_LINE:

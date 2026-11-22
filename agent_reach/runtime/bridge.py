@@ -17,6 +17,7 @@ import secrets
 import subprocess
 import time
 import urllib.request
+from pathlib import Path
 
 from agent_reach.utils.paths import PrivatePathError, read_small_text_no_follow
 
@@ -28,11 +29,36 @@ _FOREIGN = ("Another OpenCLI daemon is already using port 19825; left it unchang
             "Ask the user to stop their own OpenCLI (`opencli daemon stop`), then retry. Reach will not stop it.")
 
 
+#: Inherited settings that could steer Node, npm or OpenCLI: inspector ports (NODE_OPTIONS=--inspect
+#: would open an unauthenticated debugger in the process that holds the token), preloaded
+#: modules, module paths, plugin and config locations. They are dropped for every Node child.
+UNSAFE_ENV_PREFIXES = ("OPENCLI_", "NODE_", "npm_", "NPM_")
+
+
+def clean_environ() -> dict:
+    return {k: v for k, v in os.environ.items() if not k.startswith(UNSAFE_ENV_PREFIXES)}
+
+
+def opencli_home() -> Path:
+    """A private, empty home for OpenCLI. It loads adapters and plugins from ~/.opencli with
+    higher precedence than its built-ins, so it must never see the user's real one."""
+    from agent_reach.utils.paths import make_private_dir
+
+    from . import browser, state
+
+    path = make_private_dir(browser.browser_root() / "opencli-home")
+    state.remember_path(path, "isolated OpenCLI home")
+    return path
+
+
 def env() -> dict:
-    """Environment that points the OpenCLI CLI and daemon at this machine's token file."""
+    """Environment for the OpenCLI CLI and daemon: this machine's token file, an isolated home,
+    and managed mode (the CLI must never start, restart or stop a daemon; the watcher owns it)."""
     from . import browser
 
-    return {"OPENCLI_DAEMON_TOKEN_FILE": str(browser.ensure_token())}
+    home = str(opencli_home())
+    return {"OPENCLI_DAEMON_TOKEN_FILE": str(browser.ensure_token()), "OPENCLI_DAEMON_MANAGED": "1",
+            "HOME": home, "USERPROFILE": home}
 
 
 def _token() -> bytes:
@@ -45,8 +71,21 @@ def _token() -> bytes:
         return b""
 
 
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """A daemon never redirects. A 3xx comes from something else on the port, and following it
+    would resend a signed request elsewhere."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        fp.close()
+        raise OSError("the local daemon port answered with a redirect")
+
+
+def _opener():
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects())  # loopback: never proxy
+
+
 def _open(path: str, headers: dict):
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # loopback: never proxy
+    opener = _opener()
     with opener.open(urllib.request.Request(URL + path, headers={"X-OpenCLI": "1", **headers}), timeout=2) as response:
         return json.loads(response.read(256 * 1024))
 
@@ -91,10 +130,27 @@ def status() -> dict:
             raise ReachError(NEED_SETUP, _FOREIGN[0], hint=_FOREIGN[1])
         return {}
     try:
-        value = _open("/status", {"Authorization": signature("GET", "/status")})
+        value = _signed_get("/status")
     except (OSError, ValueError):
         return {}
     return value if isinstance(value, dict) and value.get("ok") else {}
+
+
+def _signed_get(path: str):
+    """A signed request whose answer is used only if the daemon authenticated that exact answer."""
+    challenge = secrets.token_hex(16)
+    opener = _opener()
+    request = urllib.request.Request(URL + path, headers={
+        "X-OpenCLI": "1", "Authorization": signature("GET", path), "X-OpenCLI-Challenge": challenge})
+    with opener.open(request, timeout=2) as response:
+        body = response.read(256 * 1024)
+        proof = response.headers.get("X-OpenCLI-Proof") or ""
+        code = response.status
+    message = "\n".join(["opencli-response", challenge, str(code), hashlib.sha256(body).hexdigest()])
+    expected = hmac.new(_token(), message.encode("utf-8"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(proof, expected):
+        raise ValueError("the daemon's answer was not authenticated")
+    return json.loads(body)
 
 
 def launch_spec() -> tuple[list[str], str]:
@@ -124,9 +180,9 @@ def start():
         # It proved it knows our token, and the caller holds the watcher lock: this is our own
         # daemon left behind by a watcher that was killed. Ask it to stop, then start a fresh one.
         _shutdown_own_orphan()
-    inherited = {k: v for k, v in os.environ.items() if not k.startswith("OPENCLI_")}
+    settings = env()
     proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            env={**inherited, **env()}, cwd=os.path.expanduser("~"))
+                            env={**clean_environ(), **settings}, cwd=settings["HOME"])
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         current = status()
@@ -143,7 +199,7 @@ def start():
 
 
 def _shutdown_own_orphan() -> None:
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    opener = _opener()
     request = urllib.request.Request(URL + "/shutdown", data=b"", method="POST",
                                      headers={"X-OpenCLI": "1", "Authorization": signature("POST", "/shutdown")})
     try:

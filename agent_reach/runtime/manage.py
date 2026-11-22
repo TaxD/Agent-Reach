@@ -453,9 +453,13 @@ def _remove_skill_copy(folder: Path) -> None:
         return
     for rel in _shipped_skill_files():
         path = folder / rel
+        if path.parent.is_symlink():
+            continue  # a linked subfolder leads outside the copy; nothing behind it is ours
         if path.is_file() and not path.is_symlink():
             path.unlink()
     for directory in (folder / "references", folder):
+        if directory.is_symlink():
+            continue
         try:
             directory.rmdir()
         except OSError:

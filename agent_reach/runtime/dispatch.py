@@ -252,6 +252,8 @@ def run_action(
                                   f"that, run `agent-reach add {channel.name}`; otherwise report the public results.")
         lock = query_slot(channel.name, clock) if browser_action else nullcontext()
         with lock:
+            if browser_action and not _channel_added(channel):  # removed while this query waited in line
+                raise ReachError(NEED_SETUP, f"{channel.name} site actions are not turned on")
             limited = cooldown(channel.name)
             if limited:
                 raise ReachError(RATE_LIMITED, limited["message"])

@@ -18,6 +18,7 @@ from agent_reach.utils.process import utf8_subprocess_env, windows_hidden_kwargs
 from .result import BAD_INPUT, NEED_SETUP, TIMEOUT, ReachError, _clean
 
 _DEFAULT_MAX_BYTES = 8 * 1024 * 1024
+_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 # Some fronts (Exa's Cloudflare) block the default Python-urllib agent (error 1010).
 _USER_AGENT = f"agent-reach/{__version__}"
 _NPM_SHIM_SCRIPT = re.compile(r'"%dp0%\\(?P<script>[^"\r\n]*?\.(?:cjs|mjs|js))"', re.IGNORECASE)
@@ -71,7 +72,7 @@ def run_cmd(
     cwd: Optional[str] = None,
     label: Optional[str] = None,
     input_data: Optional[str] = None,
-    drop_env_prefix: str = "",
+    drop_env_prefix: tuple = (),
 ) -> str:
     """Run an upstream command and return stdout.
 
@@ -138,6 +139,9 @@ def run_cmd(
                 proc.stderr.close()
             proc.wait(timeout=5)
         raise ReachError(TIMEOUT, f"{name} did not finish within {timeout:.0f}s")
+    if len(out) > _MAX_OUTPUT_BYTES:
+        # ponytail: the output was already buffered; switch to a streaming read with a cap if a tool ever abuses this.
+        raise ReachError("UPSTREAM_BROKEN", f"{name} produced more output than the {_MAX_OUTPUT_BYTES} byte limit")
     stdout = out.decode("utf-8", errors="replace")
     stderr = err.decode("utf-8", errors="replace")
     if proc.returncode != 0:

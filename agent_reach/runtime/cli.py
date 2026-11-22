@@ -393,6 +393,11 @@ def _login_channel(cmd: str, args: Sequence[str]) -> Channel:
         raise _ArgError(f"unknown channel: {ns.channel}")
     if not ch.login_url:
         raise _ArgError(f"{ch.name} has no login; it reads public data only")
+    from . import manage
+
+    if not manage.is_added(ch):
+        # Nothing is installed and no browser is started for a channel the user did not turn on.
+        raise _ArgError(f"{ch.name} is not turned on; only if the user asks for it, run `agent-reach add {ch.name}` first")
     return ch
 
 
@@ -406,7 +411,6 @@ def _cmd_login(args: Sequence[str]) -> int:
     from .browser_binding import exclusive_browser
 
     try:
-        manage.add(ch.name)
         with exclusive_browser():  # opening the window may start the browser
             browser.start(ch.login_url)
         state.mutate(lambda data: data.setdefault("session_revisions", {}).__setitem__(ch.name, state.now()))
@@ -445,7 +449,12 @@ def _cmd_browser(args: Sequence[str]) -> int:
         return _bad_input(None, "browser", str(exc))
     if ns.op == "status":
         return _mgmt("browser status", browser.status)
+    from . import manage
     from .browser_binding import exclusive_browser
+
+    if ns.op == "setup" and not any(ch.login_url and manage.is_added(ch) for ch in unified_channels()):
+        return _bad_input(None, "browser", "no login channel is turned on; the browser is only for reddit/twitter "
+                                           "after `agent-reach add <channel>`")
 
     def run(fn):
         with exclusive_browser():

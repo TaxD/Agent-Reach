@@ -61,7 +61,9 @@ def get_bytes(url: str, timeout: float, *, max_bytes: int = MAX_JSON_BYTES, acce
     # on a trusted site cannot point this machine at its own network.
     # ponytail: behind a proxy the proxy resolves names, so hops are validated by
     # their literal host only; address pinning there needs a CONNECT-aware client.
-    return fetch_public(url, timeout, max_bytes=max_bytes, accept=accept, via_proxy=_proxy_configured())
+    host = urlsplit(url).hostname or ""
+    via_proxy = _proxy_configured() and not urllib.request.proxy_bypass(host)  # NO_PROXY hosts go direct, pinned
+    return fetch_public(url, timeout, max_bytes=max_bytes, accept=accept, via_proxy=via_proxy)
 
 
 def get_json(url: str, timeout: float) -> Any:
@@ -147,8 +149,15 @@ def parse_feed(body: bytes, limit: int, *, prefer_summary: bool = False) -> list
     head = body[:4096]
     if b"\x00" in head or body[:2] in (b"\xff\xfe", b"\xfe\xff"):
         raise ReachError(UPSTREAM_BROKEN, "feed is not UTF-8/ASCII-compatible XML")
-    declared = re.match(rb"\s*<\?xml[^>]*?encoding\s*=\s*[\"']([A-Za-z0-9._-]+)", body[:512].removeprefix(b"\xef\xbb\xbf"))
-    if declared and declared.group(1).lower() not in _ASCII_COMPATIBLE:
+    start = body.removeprefix(b"\xef\xbb\xbf").lstrip()
+    if start[:5].lower() == b"<?xml":
+        end = start.find(b"?>", 0, 4096)
+        if end < 0:
+            raise ReachError(UPSTREAM_BROKEN, "feed has a malformed XML declaration; refused")
+        declared = re.search(rb"encoding\s*=\s*[\"']([^\"']*)[\"']", start[:end])
+    else:
+        declared = None
+    if declared and declared.group(1).strip().lower() not in _ASCII_COMPATIBLE:
         # The checks below read bytes; an EBCDIC-style encoding would hide markup from them.
         raise ReachError(UPSTREAM_BROKEN, "feed uses an unsupported text encoding; refused")
     # Walk the prolog properly (XML declaration, comments, processing instructions).

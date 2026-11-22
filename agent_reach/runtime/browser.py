@@ -43,7 +43,7 @@ from agent_reach.utils.paths import (
 
 from .result import NEED_SETUP, UPSTREAM_BROKEN, ReachError
 
-#: Close the browser after this many seconds without Agent Reach use or user input.
+#: Close the browser after this many seconds without an Agent Reach command (login included).
 IDLE_LIMIT = 600.0
 #: Longest wait for the browser, the extension and the daemon to connect.
 START_WAIT = 90.0
@@ -54,10 +54,10 @@ _LOCK_WAIT = START_WAIT + 30.0
 #: unpacking, and the unpacked files by a tree digest before every browser start.
 #: Bump these together with the OpenCLI lock files in runtime/opencli_lock/.
 OPENCLI_EXTENSION_URL = (
-    "https://github.com/TaxD/OpenCLI/releases/download/v2.0.3-reach.2/opencli-extension-1.0.27.2.zip"
+    "https://github.com/TaxD/OpenCLI/releases/download/v2.0.3-reach.3/opencli-extension-1.0.27.3.zip"
 )
-OPENCLI_EXTENSION_SHA256 = "41bf22fce131c7bda53c44750bc5c0c385c919a135a292589822148e4f17a475"
-OPENCLI_EXTENSION_TREE_SHA256 = "304d62113d398501d359e86b16724ef46f9e7838ffd664657a48497374bf8dd9"
+OPENCLI_EXTENSION_SHA256 = "4c3f71a3597e02df872db4e4035f00de710c4f97eda307fd26489acfda6e8ca1"
+OPENCLI_EXTENSION_TREE_SHA256 = "7a63bf8fe8d0236bf3a65a53194577bebb9311a0bdf68d057ab4b876d43324cb"
 _MAX_EXTENSION_BYTES = 16 * 1024 * 1024
 #: Written into the extension folder at install; holds this machine's daemon token.
 TOKEN_FILE_IN_EXTENSION = "daemon-token.json"

@@ -146,11 +146,20 @@ def install_env() -> dict:
     return env
 
 
-def _run(argv, timeout: float = 600, *, stage: str = "tool_install", cwd: Optional[str] = None) -> str:
+def _run(argv, timeout: float = 600, *, stage: str = "tool_install", cwd: Optional[str] = None,
+         node_safe: bool = False) -> str:
     hint = f"Stage: {stage}. Check the network, then rerun setup; installed packages and download caches are reused."
+    run_env = install_env()
+    if node_safe:
+        # npm must not inherit inspector flags, preloads or a user npmrc override; keep only our cache setting.
+        cache = run_env.get("npm_config_cache")
+        run_env = {k: v for k, v in run_env.items() if not k.startswith(("NODE_", "npm_", "NPM_", "OPENCLI_"))}
+        if cache:
+            run_env["npm_config_cache"] = cache
+        run_env["npm_config_userconfig"] = os.devnull
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
-                              env=install_env(), cwd=cwd or os.path.expanduser("~"),  # never the agent's project folder
+                              env=run_env, cwd=cwd or os.path.expanduser("~"),  # never the agent's project folder
                               **windows_hidden_kwargs())
     except FileNotFoundError:
         raise ReachError(NEED_SETUP, f"{Path(argv[0]).name} is not installed") from None
@@ -199,7 +208,8 @@ def _install_opencli(tool: Tool) -> None:
     npm = shutil.which("npm")
     if not npm:
         raise ReachError(NEED_SETUP, "npm is not installed", hint="Ask the user to install Node.js 20.18.1 or newer.")
-    _run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--omit=dev"], stage="opencli:npm_ci", cwd=str(folder))
+    _run([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund", "--omit=dev"], stage="opencli:npm_ci", cwd=str(folder),
+         node_safe=True)
     if not _private_bin(tool, "opencli").exists():
         raise ReachError(UPSTREAM_BROKEN, "npm finished but the OpenCLI command is missing")
 

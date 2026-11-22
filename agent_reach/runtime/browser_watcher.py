@@ -3,7 +3,8 @@
 Started detached by runtime.browser. Holds ~/.agent-reach/browser/watcher.lock
 so only one runs. It starts the token-protected OpenCLI daemon and a visible
 Chrome over the CDP pipe, loads the pinned extension, serves the control
-socket (cdp.ControlServer) and closes everything after the idle limit.
+socket (cdp.ControlServer) and closes everything after the idle limit. Only
+Agent Reach commands count as use; nothing a web page does can keep it open.
 
 It is the only process that can talk to Chrome. It never returns cookie
 values to anyone: the control commands are ping, open (a channel's login page),
@@ -26,20 +27,6 @@ from .cdp import ControlServer, PipeConnection, domain_matches
 
 #: Key the OpenCLI extension uses to persist its profile id inside each browser profile.
 _CONTEXT_ID_KEY = "opencli_context_id_v1"
-
-# Generic activity signal only: no site selectors, content or credentials.
-_ACTIVITY = """(() => {
-  if (!window.__reachActivityInstalled) {
-    window.__reachActivityInstalled = true;
-    window.__reachLastInput = 0;
-    for (const name of ['pointerdown', 'keydown', 'wheel', 'touchstart'])
-      addEventListener(name, event => {
-        if (event.isTrusted) window.__reachLastInput = Date.now();
-      }, {capture: true, passive: true});
-  }
-  return window.__reachLastInput;
-})()"""
-
 
 def _launch_with_pipe(chrome: str):
     """Start Chrome with the CDP pipe on its fds 3 (commands in) and 4 (replies out)."""
@@ -98,16 +85,6 @@ def _context_id(conn: PipeConnection) -> Optional[str]:
     return None
 
 
-def _observe_activity(conn: PipeConnection) -> None:
-    """Trusted human input in any page counts as use, so a login in progress is not closed."""
-    for target in _pages(conn):
-        reply = conn.on_target(target["targetId"], "Runtime.evaluate",
-                               {"expression": _ACTIVITY, "returnByValue": True}, timeout=5)
-        value = ((reply.get("result") or {}).get("result") or {}).get("value")
-        if isinstance(value, (int, float)) and (browser.last_used() or 0) < value / 1000 <= time.time() + 1:
-            browser.touch()
-
-
 def _login_pages() -> dict:
     """login URL -> cookie domains, for the channels that have a login."""
     from agent_reach.channels import get_all_channels
@@ -162,7 +139,10 @@ def _clear_site(conn: PipeConnection, domains: object = None, **_ignored) -> dic
     if page is None:
         return {"ok": False, "error": "no page to clear storage from"}
     for origin in sorted({scheme + h for h in hosts if h for scheme in ("https://", "http://")}):
-        conn.on_target(page["targetId"], "Storage.clearDataForOrigin", {"origin": origin, "storageTypes": "all"}, timeout=15)
+        cleared = conn.on_target(page["targetId"], "Storage.clearDataForOrigin",
+                                 {"origin": origin, "storageTypes": "all"}, timeout=15)
+        if "result" not in cleared:
+            return {"ok": False, "error": "could not clear site storage"}
     after = (conn.call("Storage.getCookies").get("result") or {}).get("cookies")
     if not isinstance(after, list) or any(isinstance(c, dict) and ours(str(c.get("domain", ""))) for c in after):
         return {"ok": False, "error": "cleanup could not be verified"}
@@ -205,7 +185,6 @@ def watch(chrome: str, idle: Optional[float] = None, poll: float = 3.0) -> str:
                 return "owned daemon exited; browser closed with it"
             if context["id"] is None:
                 context["id"] = _context_id(conn)
-            _observe_activity(conn)
             if max(began, browser.last_used() or 0.0) + idle <= time.time():
                 return "closed after idle"
             if stopping.wait(poll):

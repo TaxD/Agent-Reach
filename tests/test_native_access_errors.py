@@ -52,8 +52,8 @@ def test_github_repository_without_readme_keeps_metadata(monkeypatch, backend):
 
     def get(url, **kwargs):
         if url.endswith('/readme'):
-            if backend == 'gh':
-                raise CommandFailed('UPSTREAM_BROKEN', 'gh exited', stderr='gh: Not Found (HTTP 404)')
+            # Content is always requested anonymously over HTTP, whichever backend found the repository.
+            assert 'Authorization' not in kwargs.get('headers', {})
             raise urllib.error.HTTPError(url, 404, 'Not Found', {}, None)
         return json.dumps(repository).encode()
 

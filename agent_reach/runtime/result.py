@@ -36,7 +36,7 @@ DEFAULT_HINTS = {
     "BUSY": "The shared browser stayed full while this command waited in line, or a login window is open. Retry later; do not switch profiles.",
     PLATFORM_BLOCKED: "Stop automation. Keep this profile; the user must resolve the platform verification in the official page. Do not switch backends or retry.",
     NEED_SETUP: "This backend is not installed. Ask the user to run `agent-reach doctor` for setup steps.",
-    NEED_LOGIN: "The attempted saved/local session did not grant access. Offer site-scoped local reuse or let the user log in themselves; never ask for a password.",
+    NEED_LOGIN: "The site wants a login. Only the user can log in, in the visible Agent Reach browser window (`agent-reach login <channel>`); never ask for a password and never log in for them.",
     UPSTREAM_BROKEN: "This channel is temporarily not working; `message` is what was reported. Tell the user in plain words which platform has a problem, without naming tools; suggest `agent-reach update` only if the message points to an outdated tool; do not retry in a loop.",
     TIMEOUT: "The operation timed out. Inspect channel status and the failed stage; do not reopen login windows or repeat requests in a loop.",
     RATE_LIMITED: "The platform reported a rate limit. Reach pauses this channel; respect retry_after_seconds and do not switch backends.",
@@ -47,6 +47,27 @@ DEFAULT_HINTS = {
 _MAX_MESSAGE_CHARS = 500
 #: Upper bound for one item's text (a long README or transcript still fits).
 MAX_TEXT_CHARS = 200_000
+MAX_RAW_CHARS = 20_000
+#: Budget for all items of one answer together.
+MAX_OUTPUT_CHARS = 400_000
+
+
+def _within_budget(items: list) -> tuple:
+    """Keep leading items while their total serialized size fits; the first item is always kept."""
+    import json
+
+    total = 0
+    kept: list = []
+    for item in items:
+        try:
+            size = len(json.dumps(item, ensure_ascii=False, default=str))
+        except (TypeError, ValueError):
+            size = MAX_OUTPUT_CHARS
+        if kept and total + size > MAX_OUTPUT_CHARS:
+            break
+        kept.append(item)
+        total += size
+    return kept, len(items) - len(kept)
 
 
 class ReachError(Exception):
@@ -107,8 +128,19 @@ def make_item(
         "author": cap(author, 200),
         "published_at": cap(published_at, 64),
         "text": cap(text, MAX_TEXT_CHARS),
-        "raw": raw,
+        "raw": _bounded_raw(raw),
     }
+
+
+def _bounded_raw(raw: Any) -> Any:
+    """Upstream detail is kept only while it stays small; it must not flood the agent's context."""
+    import json
+
+    try:
+        size = len(json.dumps(raw, ensure_ascii=False, default=str))
+    except (TypeError, ValueError):
+        return {"omitted": "raw data could not be serialized"}
+    return raw if size <= MAX_RAW_CHARS else {"omitted": f"raw data exceeded {MAX_RAW_CHARS} characters"}
 
 
 def unix_to_iso(value: Any) -> Optional[str]:
@@ -133,14 +165,18 @@ def envelope(
     error: Optional[ReachError] = None,
 ) -> dict:
     """Build the unified output object."""
+    kept, dropped = _within_budget(list(items or [])) if error is None else ([], 0)
+    meta: dict = {"elapsed_ms": elapsed_ms, "attempts": list(attempts or [])}
+    if dropped:
+        meta["truncated"] = {"dropped_items": dropped, "reason": f"output exceeded {MAX_OUTPUT_CHARS} characters"}
     return {
         "schema_version": SCHEMA_VERSION,
         "ok": error is None,
         "channel": channel,
         "action": action,
         "backend": backend if error is None else None,
-        "items": list(items or []) if error is None else [],
-        "meta": {"elapsed_ms": elapsed_ms, "attempts": list(attempts or [])},
+        "items": kept,
+        "meta": meta,
         "error": None
         if error is None
         else {

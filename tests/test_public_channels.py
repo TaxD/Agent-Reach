@@ -356,3 +356,41 @@ def test_web_readers_pass_real_content_through(monkeypatch):
     monkeypatch.setattr(WebChannel, "_exa_read", lambda self, **kw: [])
     with pytest.raises(ReachError):
         MediumChannel()._exa_read(target="https://medium.com/@a/post", timeout=1)
+
+
+def test_raw_and_whole_answers_are_bounded():
+    from agent_reach.runtime import result
+
+    big = result.make_item(title="t", raw={"deps": ["x" * 100] * 1000})
+    assert big["raw"] == {"omitted": f"raw data exceeded {result.MAX_RAW_CHARS} characters"}
+    assert result.make_item(raw={"a": 1})["raw"] == {"a": 1}
+    items = [result.make_item(title=str(i), text="y" * 150_000) for i in range(6)]
+    out = result.envelope(channel="c", action="a", backend="b", items=items)
+    assert 1 <= len(out["items"]) < 6 and out["meta"]["truncated"]["dropped_items"] == 6 - len(out["items"])
+    assert "truncated" not in result.envelope(channel="c", action="a", backend="b", items=items[:1])["meta"]
+
+
+@pytest.mark.parametrize("payload", [
+    b'<?xml version="1.0"' + b" " * 600 + b'encoding="cp037"?><rss/>',
+    b'<?xml version="1.0" encoding="utf-16"?><rss/>',
+    b'<?xml version="1.0" ' + b" " * 5000 + b'?><rss/>',
+])
+def test_the_whole_xml_declaration_decides_the_encoding(payload):
+    with pytest.raises(ReachError) as err:
+        _public.parse_feed(payload, 5)
+    assert err.value.code == UPSTREAM_BROKEN
+
+
+def test_the_daemon_port_is_never_followed_through_a_redirect():
+    from agent_reach.runtime import bridge
+
+    class Body:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    body = Body()
+    with pytest.raises(OSError):
+        bridge._NoRedirects().redirect_request(None, body, 302, "Found", {}, "http://evil.example/")
+    assert body.closed

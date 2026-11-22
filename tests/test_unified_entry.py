@@ -475,12 +475,17 @@ def test_login_opens_site_in_dedicated_browser(capsys, monkeypatch, fake_browser
 
     monkeypatch.setattr(unified, "get_all_channels", lambda: [BrowserChannel()])
     from agent_reach.runtime import manage
-    added = []
-    # Hermetic: no check of the real OpenCLI install on this machine.
-    monkeypatch.setattr(manage, "add", lambda name, **k: added.append(name))
+    monkeypatch.setattr(manage, "add", lambda name, **k: pytest.fail("login must never turn a channel on by itself"))
+    # A channel the user did not turn on: nothing is installed and no browser is started.
+    monkeypatch.setattr(manage, "is_added", lambda ch, data=None: False)
+    code, out = _run(capsys, ["login", "web2"])
+    assert code == 1 and out["error"]["code"] == "BAD_INPUT" and "agent-reach add web2" in out["error"]["message"]
+    assert fake_browser["opened"] == []
+    code, out = _run(capsys, ["logout", "web2"])
+    assert code == 1 and fake_browser["opened"] == []
+    monkeypatch.setattr(manage, "is_added", lambda ch, data=None: True)
     code, out = _run(capsys, ["login", "web2"])
     assert code == 0
-    assert added == ["web2"]
     assert fake_browser["opened"] == ["https://example.test/login"]
 
 

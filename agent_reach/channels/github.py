@@ -70,10 +70,19 @@ def _gh_get(path: str, timeout: float, accept: str = "application/vnd.github+jso
     return out.encode("utf-8")
 
 
-def _api_get(path: str, timeout: float, accept: str = "application/vnd.github+json") -> bytes:
+def _anonymous_get(path: str, timeout: float, accept: str = "application/vnd.github+json") -> bytes:
+    """Content (README, issue, comments) is requested without any credential.
+
+    GitHub itself then refuses anything that is not public, whatever happened between
+    the visibility check and this request (a repository made private, an issue moved).
+    """
+    return _api_get(path, timeout, accept, anonymous=True)
+
+
+def _api_get(path: str, timeout: float, accept: str = "application/vnd.github+json", *, anonymous: bool = False) -> bytes:
     headers = {"Accept": accept, "User-Agent": "agent-reach"}
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    if not token:
+    token = None if anonymous else (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN"))
+    if not token and not anonymous:
         from agent_reach.config import Config
 
         token = Config(read_only=True).get("github_token")
@@ -161,15 +170,15 @@ class GitHubChannel(Channel):
             raise ReachError(NOT_FOUND, "GitHub repository not found (only public repositories are read)")
         if number is None:
             try:
-                readme = get(f"/repos/{owner}/{repo}/readme", timeout / 3, "application/vnd.github.raw")
+                readme = _anonymous_get(f"/repos/{owner}/{repo}/readme", timeout / 3, "application/vnd.github.raw")
                 readme_text = readme.decode("utf-8", errors="replace")[:_README_MAX_CHARS]
             except ReachError as exc:
                 if exc.code != NOT_FOUND:
                     raise
                 readme_text = None
             return [_repo_item(info, readme_text)]
-        issue = json.loads(get(f"/repos/{owner}/{repo}/issues/{number}", timeout / 3))
-        comments = json.loads(get(f"/repos/{owner}/{repo}/issues/{number}/comments?per_page=50", timeout / 3))
+        issue = json.loads(_anonymous_get(f"/repos/{owner}/{repo}/issues/{number}", timeout / 3))
+        comments = json.loads(_anonymous_get(f"/repos/{owner}/{repo}/issues/{number}/comments?per_page=50", timeout / 3))
         parts = [issue.get("body") or ""]
         for c in comments:
             parts.append(f"\n@{(c.get('user') or {}).get('login', '')}: {c.get('body') or ''}")

@@ -4,6 +4,6 @@
   "private": true,
   "description": "Pinned OpenCLI (hardened fork) for Agent Reach. Installed with `npm ci --ignore-scripts`.",
   "dependencies": {
-    "@jackwener/opencli": "https://github.com/TaxD/OpenCLI/releases/download/v2.0.3-reach.2/jackwener-opencli-2.0.3-reach.2.tgz"
+    "@jackwener/opencli": "https://github.com/TaxD/OpenCLI/releases/download/v2.0.3-reach.3/jackwener-opencli-2.0.3-reach.3.tgz"
   }
 }

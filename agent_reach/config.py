@@ -139,7 +139,7 @@ class Config:
 
         try:
             loaded = yaml.safe_load(payload)
-        except yaml.YAMLError as exc:
+        except (yaml.YAMLError, ValueError, TypeError, OverflowError) as exc:
             # The parser's message quotes the offending line, which may hold a key.
             mark = getattr(exc, "problem_mark", None)
             where = f" (line {mark.line + 1}, column {mark.column + 1})" if mark else ""
