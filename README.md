@@ -22,7 +22,7 @@ AI 에이전트가 여러 플랫폼의 공개 콘텐츠를 **읽기 전용**으�
 | `yozm` | 한국 IT 실무자의 개발·기획·디자인 심층 글 (요즘IT) | latest, search, read | 불필요 |
 | `medium` | 엔지니어링 블로그와 장문 에세이 | tag, user, search, read | 불필요 |
 | `producthunt` | 새로 출시된 제품·AI 도구·개발자 도구 탐색 | latest, search, read | 불필요 |
-| `dribbble` | UI·앱·웹 디자인 참고 사례 (실험적) | search, read | 불필요 |
+| `dribbble` | UI·앱·웹 디자인 참고 사례 | search, read | 불필요 |
 | `youtube` | 강연·튜토리얼 영상 검색, 자막 전문으로 내용 파악 | search, read, subtitle, transcribe | 불필요 |
 | `bluesky` | 개발자·연구자의 실시간 반응과 공지 | search, profile, posts, read | 불필요 |
 | `reddit` | 일반 사용자와 실무자의 경험담·추천·비교 | search, read, subreddit | 일부 동작 |

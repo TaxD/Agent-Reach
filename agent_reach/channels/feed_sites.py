@@ -88,7 +88,6 @@ class DribbbleChannel(_FeedSite):
     purpose = ("UI·앱·웹·브랜딩 디자인의 참고 사례와 시각적 경향을 찾을 때 사용합니다. 공개 API가 없어서 웹 검색으로 "
                "작업물 링크와 설명을 찾는 방식이며, 이미지 자체는 반환하지 않으므로 링크를 사용자에게 제시합니다.")
     hosts = ("dribbble.com",)
-    level = "experimental"
     actions = (_search_action("Dribbble"), _read_action("작업물 페이지"))
 
 
