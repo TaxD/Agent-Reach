@@ -54,10 +54,10 @@ _LOCK_WAIT = START_WAIT + 30.0
 #: unpacking, and the unpacked files by a tree digest before every browser start.
 #: Bump these together with the OpenCLI lock files in runtime/opencli_lock/.
 OPENCLI_EXTENSION_URL = (
-    "https://github.com/TaxD/OpenCLI/releases/download/v2.0.3-reach.3/opencli-extension-1.0.27.3.zip"
+    "https://github.com/TaxD/OpenCLI/releases/download/v2.0.3-reach.4/opencli-extension-1.0.27.4.zip"
 )
-OPENCLI_EXTENSION_SHA256 = "4c3f71a3597e02df872db4e4035f00de710c4f97eda307fd26489acfda6e8ca1"
-OPENCLI_EXTENSION_TREE_SHA256 = "7a63bf8fe8d0236bf3a65a53194577bebb9311a0bdf68d057ab4b876d43324cb"
+OPENCLI_EXTENSION_SHA256 = "07003b7c8f1053cb32203f61acdf64c0a11d32aecc388438f8816f9a44c24c11"
+OPENCLI_EXTENSION_TREE_SHA256 = "66a4ca39c0a3a7d2a2ced9e7dfd65e08616ff9554035a2ead71f04ddc8fd59df"
 _MAX_EXTENSION_BYTES = 16 * 1024 * 1024
 #: Written into the extension folder at install; holds this machine's daemon token.
 TOKEN_FILE_IN_EXTENSION = "daemon-token.json"
