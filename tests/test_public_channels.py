@@ -214,6 +214,15 @@ def test_ytdlp_ignores_ambient_config_plugins_and_browser_cookies():
     assert {"--ignore-config", "--no-plugin-dirs", "--no-cookies-from-browser", "--no-cookies"} <= set(argv)
 
 
+def test_modified_extension_files_are_not_trusted(tmp_path, monkeypatch):
+    from agent_reach.runtime import browser
+
+    monkeypatch.setattr(browser, "extension_dir", lambda: tmp_path / "extension")
+    (tmp_path / "extension").mkdir()
+    (tmp_path / "extension" / "manifest.json").write_text('{"version": "1.0.27"}')
+    assert browser.extension_tree_digest() and not browser.extension_intact()
+
+
 def test_rss_failures_never_pause_the_channel_for_other_feeds(monkeypatch):
     def boom(url, timeout):
         raise TimeoutError()
@@ -285,6 +294,17 @@ def test_site_search_keeps_only_results_on_the_site(monkeypatch):
     assert [r["title"] for r in _public.site_search(("dev.to",), "q", 5, 1)] == ["ok"]
 
 
+def test_opencli_refuses_option_like_arguments_before_touching_the_browser(monkeypatch):
+    from agent_reach.backends import opencli
+    from agent_reach.runtime import browser_binding
+
+    monkeypatch.setattr(browser_binding, "environment", lambda site: pytest.fail("must not prepare the browser"))
+    for args in (["search", "--profile=other"], ["read", "-f"], ["profile", "--help"]):
+        with pytest.raises(ReachError) as err:
+            opencli.opencli_call("reddit", args, timeout=1)
+        assert err.value.code == BAD_INPUT
+
+
 @pytest.mark.parametrize("target", ["../user", "./x", "x/..", "https://github.com/../user"])
 def test_github_target_cannot_walk_the_api_path(target):
     from agent_reach.channels.github import _parse_target
@@ -292,54 +312,3 @@ def test_github_target_cannot_walk_the_api_path(target):
     with pytest.raises(ReachError) as err:
         _parse_target(target)
     assert err.value.code == BAD_INPUT
-
-
-def test_no_channel_logs_in_or_needs_a_browser():
-    import agent_reach.runtime as runtime
-
-    for gone in ("browser", "cdp", "bridge", "session_reuse", "sessions", "browser_watcher", "public_web"):
-        assert not (runtime.__path__[0] and __import__("pathlib").Path(runtime.__path__[0], gone + ".py").exists()), gone
-    for ch in get_all_channels():
-        assert ch.level == "default", ch.name
-        for attr in ("login_url", "login_argv", "session", "tools"):
-            assert not hasattr(ch, attr), (ch.name, attr)
-        assert set(ch.prereqs) <= {"ffmpeg"}, ch.name
-
-
-def test_tweet_embed_token_and_target_parsing(monkeypatch):
-    from agent_reach.channels import twitter
-
-    assert twitter._embed_token("20") == "6dq1"
-    seen = []
-    monkeypatch.setattr(twitter, "get_json", lambda url, timeout: seen.append(url) or {
-        "text": "hello", "created_at": "2006-03-21T20:50:14.000Z", "user": {"screen_name": "jack", "name": "jack"}})
-    ch = twitter.TwitterChannel()
-    for target in ("20", "https://x.com/jack/status/20", "https://twitter.com/jack/status/20?s=1"):
-        (item,) = ch._read(target=target, timeout=1)
-        assert item["url"] == "https://x.com/jack/status/20" and item["author"] == "jack" and item["text"] == "hello"
-    assert all(u.startswith("https://cdn.syndication.twimg.com/tweet-result?id=20&token=6dq1") for u in seen)
-    for bad in ("https://evil.example/jack/status/20", "abc", "20&token=x", "https://x.com/jack"):
-        with pytest.raises(ReachError) as err:
-            ch._read(target=bad, timeout=1)
-        assert err.value.code == BAD_INPUT
-
-
-def test_block_pages_are_failures_so_the_next_reader_is_tried():
-    with pytest.raises(ReachError) as err:
-        _public.WebReadMixin._usable([{"text": "You've been blocked by network security.\n\nTo continue, log in"}])
-    assert err.value.code == UPSTREAM_BROKEN
-    with pytest.raises(ReachError):
-        _public.WebReadMixin._usable([{"text": ""}])
-    assert _public.WebReadMixin._usable([{"text": "real article text"}])
-
-
-def test_search_provider_limits_do_not_cool_down_the_destination_channel(monkeypatch):
-    from agent_reach.channels.web import WebChannel
-    from agent_reach.runtime.result import RATE_LIMITED
-
-    def limited(self, **kw):
-        raise ReachError(RATE_LIMITED, "Exa: quota")
-    monkeypatch.setattr(WebChannel, "_exa_search", limited)
-    with pytest.raises(ReachError) as err:
-        _public.site_search(("reddit.com",), "q", 3, 1)
-    assert err.value.code == UPSTREAM_BROKEN

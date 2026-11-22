@@ -80,7 +80,7 @@ def _run_ytdlp(args: list, timeout: float, cwd=None) -> str:
             raise ReachError(
                 PLATFORM_BLOCKED,
                 exc.message,
-                hint="YouTube returned a verification challenge. Stop this request; do not retry or try to get around it.",
+                hint="YouTube returned a verification challenge. Stop this request; this does not establish that the public video requires login.",
             ) from None
         if "429" in err or "too many requests" in err:
             raise ReachError(RATE_LIMITED, exc.message) from None

@@ -1,65 +1,93 @@
 # -*- coding: utf-8 -*-
-"""X (Twitter) — public content only, through the public embed endpoints. No login."""
+"""Twitter/X — OpenCLI in the Agent Reach browser (experimental)."""
 
-import math
-import re
-from urllib.parse import urlencode, urlsplit
-
-from agent_reach.runtime.result import BAD_INPUT, NOT_FOUND, ReachError, make_item
+from agent_reach.backends.opencli import opencli_call, opencli_items
+from agent_reach.runtime.result import UPSTREAM_BROKEN, ReachError
 from agent_reach.utils.url import host_matches
 
-from ._public import get_json
 from .base import Action, Channel, Param
 
-_EMBED = "https://cdn.syndication.twimg.com/tweet-result"
-_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+_TWITTER_LOGIN_HINT = (
+    "Ask the user to log in to x.com in the Agent Reach dedicated browser. Never log in on their behalf."
+)
 
 
-def _embed_token(tweet_id: str) -> str:
-    """The token the public embed widget derives from the id (base 36 of id/1e15*pi, zeros and dot dropped)."""
-    value = int(tweet_id) / 1e15 * math.pi
-    whole, frac = int(value), value - int(value)
-    head = ""
-    while whole:
-        head = _DIGITS[whole % 36] + head
-        whole //= 36
-    tail = ""
-    for _ in range(12):
-        frac *= 36
-        tail += _DIGITS[int(frac)]
-        frac -= int(frac)
-    return (head + tail).replace("0", "") or "a"
+def _x(args, timeout: float) -> list:
+    items = opencli_items(opencli_call("twitter", list(args), timeout=timeout, login_hint=_TWITTER_LOGIN_HINT))
+    if not items:
+        raise ReachError(UPSTREAM_BROKEN, "OpenCLI finished but returned no items")
+    return items
 
 
 class TwitterChannel(Channel):
     name = "twitter"
-    description = "X(Twitter) 공개 트윗"
-    purpose = ("x.com 또는 twitter.com 트윗 링크(또는 트윗 id)를 받았을 때 그 트윗 하나의 본문·작성자·날짜를 읽는 용도입니다. "
-               "로그인 없이 공개 임베드로만 읽으므로 검색·타임라인·답글은 제공하지 않습니다. 주제 검색과 실시간 반응은 bluesky를 사용합니다.")
-    level = "default"
-    hosts = ("x.com", "twitter.com")
+    description = "X(Twitter) 트윗"
+    purpose = ("특정 인물·회사·프로젝트의 공식 발표와 실시간 반응을 확인할 때 사용합니다. 사용자가 전용 브라우저에서 직접 "
+               "로그인해야 동작하는 실험적 채널이므로, 로그인 없이 가능한 bluesky·웹 검색으로 충분한지 먼저 판단합니다.")
+
+    # twitter-cli is not used here: even with explicit credentials it re-reads
+    # browser cookies whenever verification fails.
+    level = "experimental"
+    login_url = "https://x.com/i/flow/login"
+    tools = ("opencli",)
+    prereqs = ("node", "chrome")
+
+    def setup_problems(self):
+        from agent_reach.runtime.browser_binding import setup_problems
+
+        return setup_problems(self.name)
+
     actions = (
-        Action("read", "트윗 하나 읽기 (공개 임베드)", (Param("target", "트윗 링크 또는 id"),),
-               (("embed", "_read"),), live_test={"target": "20"}),
+        Action(
+            "search",
+            "트윗 검색",
+            (
+                Param("query", "검색어"),
+                Param("limit", "최대 결과 수", required=False, type=int, default=5),
+            ),
+            (("opencli", "_opencli_search"),),
+            live_test={"query": "openai", "limit": 2},
+            public_web=("x.com/", "twitter.com/"),
+        ),
+        Action(
+            "profile",
+            "사용자 프로필",
+            (Param("username", "@ 를 뺀 핸들"),),
+            (("opencli", "_opencli_profile"),),
+            live_test={"username": "OpenAI"},
+        ),
+        Action(
+            "tweets",
+            "사용자의 최근 트윗",
+            (
+                Param("username", "@ 를 뺀 핸들"),
+                Param("limit", "최대 트윗 수", required=False, type=int, default=5),
+            ),
+            (("opencli", "_opencli_tweets"),),
+        ),
+        Action(
+            "thread",
+            "트윗 하나와 답글",
+            (Param("target", "트윗 id 또는 링크"),),
+            (("opencli", "_opencli_thread"),),
+        ),
     )
 
     def can_handle(self, url: str) -> bool:
-        return host_matches(url, *self.hosts)
+        return host_matches(url, "x.com", "twitter.com")
 
-    def _read(self, *, target: str, timeout: float) -> list:
-        t = str(target).strip()
-        m = re.fullmatch(r"\d{1,20}", t) or (
-            re.search(r"/status(?:es)?/(\d{1,20})(?:/|$)", urlsplit(t).path) if self.can_handle(t) else None)
-        if not m:
-            raise ReachError(BAD_INPUT, "target must be a tweet link or numeric tweet id")
-        tweet_id = m.group(m.lastindex or 0)
-        data = get_json(_EMBED + "?" + urlencode({"id": tweet_id, "token": _embed_token(tweet_id), "lang": "en"}), timeout)
-        if not isinstance(data, dict) or not data.get("text"):
-            raise ReachError(NOT_FOUND, "tweet not found, deleted, or not public")
-        user = data.get("user") or {}
-        handle = user.get("screen_name")
-        return [make_item(
-            title=None, url=f"https://x.com/{handle}/status/{tweet_id}" if handle else f"https://x.com/i/status/{tweet_id}",
-            author=handle, published_at=data.get("created_at"), text=data.get("text"),
-            raw={"id": tweet_id, "name": user.get("name"), "favorite_count": data.get("favorite_count"),
-                 "conversation_count": data.get("conversation_count"), "lang": data.get("lang")})]
+    # ── unified entry backends ──
+
+    def _opencli_search(self, *, query: str, limit: int, timeout: float) -> list:
+        return _x(["search", query, "--limit", str(limit)], timeout)[:limit]
+
+
+    def _opencli_profile(self, *, username: str, timeout: float) -> list:
+        return _x(["profile", username.lstrip("@")], timeout)[:1]
+
+    def _opencli_tweets(self, *, username: str, limit: int, timeout: float) -> list:
+        return _x(["tweets", username.lstrip("@"), "--limit", str(limit)], timeout)[:limit]
+
+    def _opencli_thread(self, *, target: str, timeout: float) -> list:
+        tweet_id = str(target).rstrip("/").split("/")[-1].split("?")[0]
+        return _x(["thread", tweet_id], timeout)

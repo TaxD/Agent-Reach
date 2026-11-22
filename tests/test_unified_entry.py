@@ -220,7 +220,6 @@ def test_channels_lists_usage_for_agents(capsys, fake_cli):
     action = out["channels"][0]["actions"][0]
     assert action["usage"] == "agent-reach fake search <query> [--limit LIMIT]"
     assert action["backends"] == ["first", "second"]
-    assert "login" not in out["channels"][0] and "public_web" not in action
 
 
 def test_check_passes_when_any_backend_works(capsys, fake_cli):
@@ -323,15 +322,369 @@ def test_github_rejects_other_targets(bad):
     assert info.value.code == "BAD_INPUT"
 
 
+class SessionChannel(FakeChannel):
+    name = "sess"
+    session = "fake-tool"
+    login_argv = ("fake-login",)
+    legacy_state = (".fake-tool",)
+
+
+@pytest.fixture
+def session_cli(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ch = SessionChannel()
+    monkeypatch.setattr(unified, "get_all_channels", lambda: [ch, FakeChannel()])
+    return tmp_path
+
+
+def test_session_env_points_tool_home_into_agent_reach(session_cli):
+    from agent_reach.runtime.sessions import session_env
+
+    env = session_env("fake-tool")
+    assert env["HOME"] == str(session_cli / ".agent-reach" / "sessions" / "fake-tool")
+
+
+def test_import_existing_copies_old_login_only_on_request(capsys, session_cli):
+    old = session_cli / ".fake-tool"
+    old.mkdir()
+    (old / "credential.json").write_text("{}")
+    code, out = _run(capsys, ["login", "sess", "--import-existing"])
+    assert code == 0
+    assert (session_cli / ".agent-reach" / "sessions" / "fake-tool" / ".fake-tool" / "credential.json").exists()
+    assert old.exists(), "the original login is left untouched"
+
+
+def test_logout_removes_only_that_session(capsys, session_cli):
+    from agent_reach.runtime.sessions import session_dir
+
+    (session_dir("fake-tool") / "x").write_text("1")
+    (session_dir("other") / "y").write_text("1")
+    code, out = _run(capsys, ["logout", "sess"])
+    assert code == 0 and out["items"] == [{"removed": True}]
+    assert not (session_cli / ".agent-reach" / "sessions" / "fake-tool").exists()
+    assert (session_cli / ".agent-reach" / "sessions" / "other" / "y").exists()
+
+
+def test_login_rejects_channels_without_managed_login(capsys, session_cli):
+    code, out = _run(capsys, ["login", "fake"])
+    assert code == 1 and out["error"]["code"] == "BAD_INPUT"
+
+
+def test_channels_reports_login_status(capsys, session_cli):
+    from agent_reach.runtime.sessions import session_dir
+
+    _, out = _run(capsys, ["channels"])
+    sess = next(c for c in out["channels"] if c["name"] == "sess")
+    assert sess["login"] == {"via": "session", "logged_in": False, "command": "agent-reach login sess"}
+    assert next(c for c in out["channels"] if c["name"] == "fake")["login"] is None
+    (session_dir("fake-tool") / "cookie").write_text("1")
+    _, out = _run(capsys, ["channels"])
+    assert next(c for c in out["channels"] if c["name"] == "sess")["login"]["logged_in"] is True
+
+
+# ── Agent Reach dedicated browser ──
+
+
+@pytest.fixture
+def fake_browser(monkeypatch, tmp_path):
+    from agent_reach.runtime import browser
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(browser, "can_load_extension", lambda: True)  # the macOS/Linux path; Windows has its own test
+    state = {"contexts": ["daily"], "running": True, "opened": [], "launches": 0, "launch_delay": 0.0,
+             "watched": False}
+
+    def fake_launch(url, *, headless=True):
+        browser.update_state(headless=headless)
+        state["launches"] += 1
+        time.sleep(state["launch_delay"])
+        state["running"] = True
+        state["watched"] = True  # a real launch starts the owning watcher
+        state["contexts"].append("dedicated")
+
+    def fake_stop(timeout=10.0):
+        state["running"] = False
+        state["watched"] = False
+        if "dedicated" in state["contexts"]:
+            state["contexts"].remove("dedicated")
+        return True
+
+    real_watcher_running = browser.watcher_running
+    monkeypatch.setattr(browser, "connected_contexts", lambda: list(state["contexts"]))
+    # The dedicated profile's own saved OpenCLI id, readable only while it runs.
+    monkeypatch.setattr(browser, "dedicated_context", lambda: "dedicated" if state["running"] else None)
+    monkeypatch.setattr(browser, "is_running", lambda: state["running"])
+    monkeypatch.setattr(browser, "_profile_pids", lambda: [999] if state["running"] else [])
+    monkeypatch.setattr(browser, "watcher_running", lambda: state["watched"] or real_watcher_running())
+    monkeypatch.setattr(browser, "start", lambda url="about:blank": state["opened"].append(url))
+    monkeypatch.setattr(browser, "_launch", fake_launch)
+    monkeypatch.setattr(browser, "stop", fake_stop)
+    monkeypatch.setattr(browser, "ensure_chrome", lambda: "/fake/chrome")
+    monkeypatch.setattr(browser, "refresh_extension", lambda: {"version": "1.0.0", "updated": False})
+    monkeypatch.setattr(browser, "_RUNNING_GRACE", 0.0)
+    return state
+
+
+def _bind_dedicated(fake_browser):
+    from agent_reach.runtime import browser
+
+    fake_browser["contexts"].append("dedicated")
+    assert browser.bind()["status"] == "ready"
+
+
+def test_browser_action_sets_up_unbound_browser_by_itself(fake_browser):
+    from agent_reach.runtime import browser
+    from agent_reach.runtime.browser_binding import environment
+
+    fake_browser["running"] = False
+    assert environment("reddit") ["OPENCLI_PROFILE"] == "dedicated"  # no NEED_SETUP, no user click
+    assert browser.bound_context() == "dedicated"  # the user's own "daily" profile is never picked
+    assert fake_browser["launches"] == 1
+
+    assert environment("reddit") ["OPENCLI_PROFILE"] == "dedicated"
+    assert fake_browser["launches"] == 1  # already open: no second browser
+
+    browser.stop()
+    assert environment("reddit") ["OPENCLI_PROFILE"] == "dedicated"
+    assert fake_browser["launches"] == 2  # closed: reopened, not set up again
+    assert browser.last_used() is not None
+
+
+def test_browser_cold_start_does_not_count_against_timeout(fake_browser):
+    from agent_reach.runtime import browser
+
+    _bind_dedicated(fake_browser)
+    fake_browser["running"] = False
+    fake_browser["contexts"].remove("dedicated")
+    fake_browser["launch_delay"] = 1.5
+    seen = {}
+
+    def opencli_backend(**kw):
+        browser.ensure_running("dedicated")
+        seen["timeout"] = kw["timeout"]
+        time.sleep(0.5)
+        return [{"title": "ok"}]
+
+    ch = FakeChannel(first=opencli_backend, second=_raise("UPSTREAM_BROKEN"))
+    out = run_action(ch, "search", {"query": "q"}, timeout=1.0)
+    assert out["ok"] is True, out
+    assert out["backend"] == "first"
+    assert fake_browser["launches"] == 1
+
+
+def test_concurrent_actions_start_one_browser(fake_browser):
+    import threading
+
+    from agent_reach.runtime import browser
+
+    _bind_dedicated(fake_browser)
+    fake_browser["running"] = False
+    fake_browser["contexts"].remove("dedicated")
+    fake_browser["launch_delay"] = 0.5
+    errors = []
+
+    def call():
+        try:
+            browser.ensure_running("dedicated")
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=call) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert errors == []
+    assert fake_browser["launches"] == 1
+
+
+def test_only_one_idle_watcher_and_it_closes_idle_browser(fake_browser, monkeypatch):
+    import threading
+
+    from agent_reach.runtime import browser, browser_watcher
+
+    stopped = []
+
+    def fake_stop(timeout=10.0):
+        stopped.append(time.time())
+        fake_browser["running"] = False
+        return True
+
+    monkeypatch.setattr(browser, "stop", fake_stop)
+    browser.touch()
+    result = {}
+    first = threading.Thread(target=lambda: result.setdefault("first", browser_watcher.watch(idle=3.0, poll=0.1)))
+    first.start()
+    assert browser.wait_for(browser.watcher_running, 2.0, interval=0.05)
+    assert browser_watcher.watch(idle=3.0, poll=0.1) == "another watcher is running"
+    first.join(8)
+    assert result["first"] == "closed after idle"
+    assert len(stopped) == 1
+    assert not browser.watcher_running()
+
+
+def test_idle_watcher_exits_when_browser_is_closed(fake_browser):
+    from agent_reach.runtime import browser_watcher
+
+    fake_browser["running"] = False
+    assert browser_watcher.watch(idle=600, poll=0.1) == "browser closed"
+
+
+def test_bind_waits_for_the_dedicated_browsers_own_profile(fake_browser):
+    from agent_reach.runtime import browser
+
+    fake_browser["contexts"].append("other")  # another Chrome with the extension connects first
+    assert browser.bind()["status"] == "waiting_for_extension"
+    assert browser.bound_context() is None
+    fake_browser["contexts"].append("dedicated")
+    assert browser.bind() == {"status": "ready", "context": "dedicated"}
+    assert browser.bound_context() == "dedicated"
+
+
+def test_setup_never_binds_the_users_chrome_reconnecting_at_the_same_time(fake_browser, monkeypatch):
+    from agent_reach.runtime import browser
+
+    real_launch = browser._launch
+
+    def launch_while_daily_reconnects(url, *, headless=True):
+        fake_browser["contexts"].remove("daily")  # the user's Chrome drops its Bridge connection ...
+        real_launch(url, headless=headless)
+        fake_browser["contexts"].insert(0, "daily")  # ... and reconnects while ours starts
+
+    monkeypatch.setattr(browser, "_launch", launch_while_daily_reconnects)
+    browser.setup()
+    assert browser.bound_context() == "dedicated"
+
+
+def test_wrong_record_is_repaired_before_a_query_uses_it(fake_browser):
+    from agent_reach.runtime import browser
+
+    browser.setup()
+    browser.update_state(opencli_context="daily")  # e.g. written by an older Agent Reach
+    browser.ensure_running()
+    assert browser.bound_context() == "dedicated"
+
+
+def test_windows_without_extension_still_needs_the_users_click(fake_browser, monkeypatch):
+    from agent_reach.backends.opencli import OPENCLI_EXTENSION_URL, opencli_call
+    from agent_reach.runtime import browser
+
+    monkeypatch.setattr(browser, "can_load_extension", lambda: False)
+    monkeypatch.setattr(browser, "_STORE_WAIT", 0.0)
+    with pytest.raises(ReachError) as info:
+        opencli_call("reddit", ["search", "x"], timeout=5)
+    assert info.value.code == "NEED_SETUP"
+    assert fake_browser["opened"] == [OPENCLI_EXTENSION_URL]
+    assert browser.setup_problems()
+
+
+def test_mac_and_linux_report_no_setup_problem_before_first_use(fake_browser):
+    from agent_reach.runtime import browser
+
+    assert browser.setup_problems() == []
+
+
+def test_opencli_rebinds_once_when_the_owned_extension_disconnects(fake_browser, monkeypatch):
+    from unittest.mock import Mock
+
+    from agent_reach.backends.opencli import opencli_call
+    from agent_reach.runtime import browser
+    browser.setup()
+    monkeypatch.setattr(browser, "watcher_running", lambda: fake_browser["watched"])
+    fake_browser["contexts"].remove("dedicated")
+    command = Mock(return_value="[]")
+    monkeypatch.setattr("agent_reach.runtime.run.run_cmd", command)
+    assert opencli_call("reddit", ["search", "x"], timeout=5) == []
+    assert fake_browser["launches"] == 2 and command.call_count == 1
+    assert browser.bound_context() == "dedicated"
+
+
+def test_browser_left_open_without_watcher_is_reopened_with_extension(fake_browser, monkeypatch):
+    from agent_reach.runtime import browser
+    from agent_reach.runtime.browser_binding import environment
+
+    browser.setup()
+    fake_browser["contexts"].remove("dedicated")  # e.g. opened by an older Agent Reach, no extension
+    monkeypatch.setattr(browser, "watcher_running", lambda: False)
+    assert environment("reddit") ["OPENCLI_PROFILE"] == "dedicated"
+    assert fake_browser["launches"] == 2
+
+
+def test_login_opens_site_in_dedicated_browser(capsys, monkeypatch, fake_browser):
+    class BrowserChannel(FakeChannel):
+        name = "web2"
+        login_url = "https://example.test/login"
+
+    monkeypatch.setattr(unified, "get_all_channels", lambda: [BrowserChannel()])
+    from agent_reach.runtime import manage
+    added = []
+    # Hermetic: no check of the real OpenCLI install on this machine.
+    monkeypatch.setattr(manage, "add", lambda name, **k: added.append(name))
+    code, out = _run(capsys, ["login", "web2"])
+    assert code == 0
+    assert added == ["web2"]
+    assert fake_browser["opened"] == ["https://example.test/login"]
+
+
 @pytest.mark.parametrize("argv", [["ask", "find VLA"], ["mcp"], ["cloak", "setup"], ["browser", "repair-opencli"],
-                                  ["browser", "status"], ["login", "reddit"], ["logout", "reddit"],
-                                  ["configure", "browser-port", "9222"], ["add", "reddit", "--allow-upgrade"],
                                   ["ensure", "reddit"],
                                   ["execute", "reddit", "search", "--params", '{"query":"VLA"}'],
                                   ["resume", "op_x"]])
 def test_retired_commands_are_rejected_without_starting_any_service(argv, monkeypatch, capsys):
-    from agent_reach.runtime import manage
+    from agent_reach.runtime import browser, manage
+    monkeypatch.setattr(browser, "ensure_running", lambda *a, **k: pytest.fail("retired command started browser"))
     monkeypatch.setattr(manage, "add", lambda *a, **k: pytest.fail("retired command installed tools"))
-    monkeypatch.setattr(manage, "setup", lambda *a, **k: pytest.fail("retired command ran setup"))
     code, out = _run(capsys, argv)
     assert code == 1 and out["error"]["code"] == "BAD_INPUT"
+
+
+@pytest.mark.parametrize(
+    "yaml_text, code",
+    [
+        ("ok: false\nerror:\n  code: COMMAND_EXEC\n  message: 'Error: HTTP 401 - make sure you are logged in to Reddit'\n", "NEED_LOGIN"),
+        ("ok: false\nerror:\n  code: AUTH_REQUIRED\n  message: 'Not logged into x.com'\n", "NEED_LOGIN"),
+        ("ok: false\nerror:\n  code: COMMAND_EXEC\n  message: 'Pre-navigation to https://x.com failed: Navigation rejected.'\n", "UPSTREAM_BROKEN"),
+        ("ok: false\nerror:\n  code: COMMAND_EXEC\n  message: 'TypeError: Failed to fetch'\n", "UPSTREAM_BROKEN"),
+    ],
+)
+def test_opencli_errors_map_to_unified_codes(yaml_text, code):
+    from agent_reach.backends.opencli import _opencli_error
+
+    assert _opencli_error(yaml_text, "").code == code
+
+
+def test_opencli_message_reaches_the_agent_but_upstream_help_is_never_a_hint():
+    from agent_reach.backends.opencli import _opencli_error
+    from agent_reach.runtime.result import envelope
+
+    text = ("node warning\nok: false\nerror:\n  code: BROWSER_CONNECT\n"
+            "  message: Browser profile \"x\" is not connected\n  help: Open the matching Chrome profile.\n")
+    err = _opencli_error(text, "reach login steps")
+    out = envelope(channel="reddit", action="search", error=err)["error"]
+    assert out["code"] == "UPSTREAM_BROKEN" and out["message"] == 'Browser profile "x" is not connected'
+    assert "matching Chrome profile" not in out["hint"]  # third-party text is not an instruction
+    login = _opencli_error("ok: false\nerror:\n  code: AUTH_REQUIRED\n  message: Not logged into x.com\n"
+                           "  help: Log in in your Chrome.\n", "reach login steps")
+    assert login.message == "Not logged into x.com" and login.hint == "reach login steps"  # Reach's own browser
+
+
+
+def test_query_uses_an_open_login_window_without_closing_it(fake_browser):
+    from agent_reach.runtime import browser
+    browser.setup()
+    browser.update_state(headless=False)  # the user is logging in in a visible window
+    browser.ensure_running()
+    browser.setup()  # e.g. `agent-reach add` while the window is open
+    assert browser._load_state()["headless"] is False
+    assert fake_browser["running"] and fake_browser["launches"] == 1
+
+
+def test_open_login_window_without_extension_is_busy_not_closed(fake_browser):
+    from agent_reach.runtime import browser
+    browser.setup()
+    browser.update_state(headless=False)
+    fake_browser["contexts"].remove("dedicated")
+    with pytest.raises(ReachError) as info:
+        browser.setup()
+    assert info.value.code == "BUSY"
+    assert fake_browser["running"] and fake_browser["launches"] == 1
