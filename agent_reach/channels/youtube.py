@@ -27,6 +27,7 @@ _VTT_TIME_RE = re.compile(
     r"(?:\d{2,}:)?\d{2}:\d{2}\.\d{3}(?:[ \t]|$)"
 )
 _TAG_RE = re.compile(r"<[^>]+>")
+_MAX_SUBTITLE_CHARS = 5_000_000
 _RAW_KEYS = ("id", "duration", "view_count", "like_count", "channel_id", "tags", "categories")
 
 
@@ -46,7 +47,9 @@ def ytdlp_base_argv() -> list:
     could otherwise make an ordinary read pull cookies out of a personal browser.
     """
     return [sys.executable, "-I", "-X", "utf8", "-m", "yt_dlp", "--ignore-config", "--no-plugin-dirs",
-            "--no-cookies-from-browser", "--no-cookies", *ytdlp_tls_args()]
+            "--no-cookies-from-browser", "--no-cookies",
+            # Only YouTube's own video and search extractors; never the generic or redirect ones.
+            "--use-extractors", "youtube,youtube:search", "--no-playlist", *ytdlp_tls_args()]
 
 
 def _ytdlp_argv(*args: str) -> list:
@@ -57,21 +60,49 @@ def _ytdlp_argv(*args: str) -> list:
     return [*ytdlp_base_argv(), "--no-warnings", *runtime, *args]
 
 
-def _video_url(target: str) -> str:
-    from agent_reach.utils.url import host_matches
+_ID_IN_PATH_RE = re.compile(r"^/(?:shorts|embed|live|v)/([A-Za-z0-9_-]{11})/?$")
+_YOUTUBE_HOSTS = ("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com")
+
+
+def _video_id(target: str) -> str:
+    """The 11-character video id from an id or one of the plain video link forms."""
+    from urllib.parse import parse_qs, urlsplit
 
     t = str(target).strip()
     if _VIDEO_ID_RE.match(t):
-        return f"https://www.youtube.com/watch?v={t}"
-    candidate = t if "://" in t else f"https://{t}"
-    if host_matches(candidate, "youtube.com", "youtu.be"):
-        return candidate
-    raise ReachError(BAD_INPUT, "target must be a YouTube link or 11-character video id")
+        return t
+    try:
+        parts = urlsplit(t if "://" in t else f"https://{t}")
+        host = (parts.hostname or "").lower()
+        port = parts.port
+    except ValueError:
+        host, port, parts = "", None, None
+    found = None
+    if parts is not None and parts.scheme in ("http", "https") and port in (None, 80, 443) and not parts.username:
+        if host == "youtu.be":
+            found = parts.path.strip("/")
+        elif host in _YOUTUBE_HOSTS:
+            if parts.path == "/watch":
+                found = (parse_qs(parts.query).get("v") or [""])[0]
+            else:
+                m = _ID_IN_PATH_RE.match(parts.path)
+                found = m.group(1) if m else None
+    if not found or not _VIDEO_ID_RE.match(found):
+        raise ReachError(BAD_INPUT, "target must be an 11-character video id or a plain YouTube video link "
+                                    "(watch?v=, youtu.be/, shorts/, embed/, live/)")
+    return found
+
+
+def _video_url(target: str) -> str:
+    """A fresh canonical watch URL. The caller's own URL is never handed to yt-dlp: consent,
+    redirect and wrapper links on a YouTube host can send it to any other address."""
+    return f"https://www.youtube.com/watch?v={_video_id(target)}"
 
 
 def _run_ytdlp(args: list, timeout: float, cwd=None) -> str:
     try:
-        return run_cmd(_ytdlp_argv(*args), timeout=timeout, cwd=cwd, label="yt-dlp")
+        return run_cmd(_ytdlp_argv(*args), timeout=timeout, cwd=cwd, label="yt-dlp",
+                       drop_env_prefix=("NODE_", "npm_", "NPM_"))  # yt-dlp may start Node as its JS runtime
     except CommandFailed as exc:
         err = exc.stderr.lower()
         if any(s in err for s in ("video unavailable", "private video", "has been removed", "does not exist")):
@@ -232,7 +263,7 @@ class YouTubeChannel(Channel):
 
             best = min(files, key=rank)
             with open(os.path.join(tmp, best), encoding="utf-8", errors="replace") as fh:
-                text = vtt_to_text(fh.read())
+                text = vtt_to_text(fh.read(_MAX_SUBTITLE_CHARS))
         title = next((ln for ln in out.splitlines() if ln.strip()), None)
         code = best.rsplit(".", 2)[-2] if best.count(".") >= 2 else None
         return [make_item(title=title, url=url, text=text, raw={"lang": code})]

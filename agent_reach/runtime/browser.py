@@ -54,10 +54,10 @@ _LOCK_WAIT = START_WAIT + 30.0
 #: unpacking, and the unpacked files by a tree digest before every browser start.
 #: Bump these together with the OpenCLI lock files in runtime/opencli_lock/.
 OPENCLI_EXTENSION_URL = (
-    "https://github.com/TaxD/OpenCLI/releases/download/v2.0.3-reach.4/opencli-extension-1.0.27.4.zip"
+    "https://github.com/TaxD/OpenCLI/releases/download/v2.0.3-reach.5/opencli-extension-1.0.27.5.zip"
 )
-OPENCLI_EXTENSION_SHA256 = "07003b7c8f1053cb32203f61acdf64c0a11d32aecc388438f8816f9a44c24c11"
-OPENCLI_EXTENSION_TREE_SHA256 = "66a4ca39c0a3a7d2a2ced9e7dfd65e08616ff9554035a2ead71f04ddc8fd59df"
+OPENCLI_EXTENSION_SHA256 = "d788894da8ae2dd6907ec690a803f373474c233f5126c4292a142f14e3c4ff81"
+OPENCLI_EXTENSION_TREE_SHA256 = "fa263f30185746cf61148d805e6fc4c52fcdecd8813f8529befbc3e0c3c98758"
 _MAX_EXTENSION_BYTES = 16 * 1024 * 1024
 #: Written into the extension folder at install; holds this machine's daemon token.
 TOKEN_FILE_IN_EXTENSION = "daemon-token.json"
@@ -453,11 +453,14 @@ def ensure_running() -> str:
 
 
 def start(url: str) -> None:
-    """Open `url` (a channel's login page) in the dedicated browser window for the user."""
+    """Open the login page of channel `url` (a channel name) in the dedicated browser window.
+
+    The caller holds exclusive_browser(). The watcher looks the page up itself.
+    """
     from . import cdp
 
     ensure_running()
-    reply = cdp.request("open", url=url)
+    reply = cdp.request("open", channel=url)
     if not reply or not reply.get("ok"):
         raise ReachError(UPSTREAM_BROKEN, "could not open the login page in the Agent Reach browser")
 
@@ -472,19 +475,19 @@ def stop(timeout: float = 20.0) -> bool:
     return wait_for(lambda: not watcher_running(), timeout, interval=0.2)
 
 
-def clear_site(domains: List[str]) -> int:
-    """Delete the dedicated browser's cookies and storage for `domains`; returns how many cookies went.
+def clear_site(channel: str) -> int:
+    """Log one channel's site out of the dedicated browser; returns how many cookies went.
 
-    Opens the browser if it is closed; does nothing when it was never used.
+    The caller holds exclusive_browser(). Opens the browser if it is closed; does
+    nothing when it was never used. The watcher works out the domains itself from
+    the channel name, so a caller cannot name arbitrary sites.
     """
     from . import cdp
-    from .browser_binding import exclusive_browser
 
-    if not domains or not (is_running() or profile_dir().is_dir()):
+    if not (is_running() or profile_dir().is_dir()):
         return 0
-    with exclusive_browser():
-        ensure_running()
-        reply = cdp.request("clear_site", timeout=60, domains=list(domains))
+    ensure_running()
+    reply = cdp.request("clear_site", timeout=60, channel=channel)
     if not reply or not reply.get("ok"):
         raise ReachError(UPSTREAM_BROKEN, "Site login cleanup could not be verified; channel retained")
     return int(reply.get("cleared") or 0)

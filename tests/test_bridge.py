@@ -11,6 +11,7 @@ from agent_reach.runtime.result import ReachError
 # conftest replaces these for every test so nothing reaches port 19825; keep the real ones here.
 REAL_STATUS = bridge.status
 REAL_START = bridge.start
+REAL_LAUNCH_SPEC = bridge.launch_spec
 TOKEN = "f" * 16 + "0123456789abcdef" * 3
 
 
@@ -102,15 +103,35 @@ def test_daemon_is_ours_only_with_the_right_proof(token, monkeypatch):
     assert bridge.daemon_is_ours() is False
 
 
+def _port(monkeypatch, listening):
+    """Replace the TCP probe of 127.0.0.1:19825 (never touch the real machine-wide port)."""
+    import contextlib
+    import socket
+
+    probes = []
+
+    def connect(address, timeout=None):
+        probes.append(address)
+        if not listening:
+            raise ConnectionRefusedError("nothing listens")
+        return contextlib.nullcontext()
+
+    monkeypatch.setattr(socket, "create_connection", connect)
+    return probes
+
+
 def test_a_listener_that_cannot_prove_itself_gets_nothing(token, monkeypatch):
     monkeypatch.setattr(bridge, "status", REAL_STATUS)
     squatter = FakeDaemon(key=None)
     monkeypatch.setattr(bridge, "_open", squatter)
+    probes = _port(monkeypatch, listening=True)
+    monkeypatch.setattr(bridge, "_signed_get", lambda path: pytest.fail("sent a signed request to a stranger"))
     with pytest.raises(ReachError) as caught:
         bridge.status()
     assert caught.value.code == "NEED_SETUP"
+    assert probes == [("127.0.0.1", 19825)], "the presence check is a bare TCP connect"
     assert all("Authorization" not in headers for _, headers in squatter.requests)
-    assert [p for p, _ in squatter.requests if not p.startswith("/ping")] == [], "no command was sent to it"
+    assert [p for p, _ in squatter.requests if not p.startswith("/ping?nonce=")] == [], "no command was sent to it"
 
 
 class _Answer:
@@ -179,7 +200,58 @@ def test_status_when_nothing_listens_is_empty(token, monkeypatch):
         raise OSError("connection refused")
 
     monkeypatch.setattr(bridge, "_open", down)
+    _port(monkeypatch, listening=False)
     assert bridge.status() == {}
+
+
+def test_an_oversized_daemon_answer_is_refused(token, monkeypatch):
+    monkeypatch.setattr(bridge, "status", REAL_STATUS)
+    monkeypatch.setattr(bridge, "daemon_is_ours", lambda: True)
+    body = b'{"ok": true, "pad": "' + b"x" * bridge._MAX_STATUS_BYTES + b'"}'
+
+    def huge(request):
+        challenge = request.get_header("X-opencli-challenge")
+        return _Answer(200, body, {"X-OpenCLI-Proof": _response_proof(token, challenge, 200, body)})
+
+    _fake_opener(monkeypatch, huge)
+    with pytest.raises(ValueError):
+        bridge._signed_get("/status")
+    assert bridge.status() == {}
+
+
+def _installed_opencli(monkeypatch, version):
+    import json
+
+    from agent_reach.runtime import tools
+
+    root = tools.opencli_root()
+    (root / "dist" / "src").mkdir(parents=True)
+    (root / "dist" / "src" / "daemon.js").write_text("// daemon")
+    (root / "package.json").write_text(json.dumps({"name": "@jackwener/opencli", "version": version}))
+    monkeypatch.setattr(tools, "resolve", lambda command: "/usr/bin/node" if command == "node" else None)
+    monkeypatch.setattr(tools, "locked_opencli_version", lambda: "2.0.3")
+    monkeypatch.setattr(bridge, "launch_spec", REAL_LAUNCH_SPEC)
+
+
+def test_launch_spec_accepts_only_the_pinned_opencli(token, monkeypatch):
+    _installed_opencli(monkeypatch, "2.0.3")
+    argv, version = bridge.launch_spec()
+    assert argv[0] == "/usr/bin/node" and argv[1].endswith("daemon.js") and version == "2.0.3"
+
+
+def test_an_unpinned_opencli_runs_neither_daemon_nor_cli(token, monkeypatch):
+    from agent_reach.backends import opencli
+    from agent_reach.runtime import browser_binding, run
+
+    _installed_opencli(monkeypatch, "2.0.2")
+    monkeypatch.setattr(bridge, "status", lambda: {})
+    monkeypatch.setattr(bridge.subprocess, "Popen", lambda *a, **k: pytest.fail("started an unpinned daemon"))
+    monkeypatch.setattr(browser_binding, "environment", lambda site: pytest.fail("prepared the browser"))
+    monkeypatch.setattr(run, "run_cmd", lambda *a, **k: pytest.fail("ran an unpinned CLI"))
+    for call in (bridge.launch_spec, REAL_START, lambda: opencli.opencli_call("reddit", "search", ["q"], timeout=1)):
+        with pytest.raises(ReachError) as caught:
+            call()
+        assert caught.value.code == "NEED_SETUP"
 
 
 def test_env_carries_the_token_path_never_the_token(token):
@@ -271,3 +343,22 @@ def test_node_children_never_inherit_inspector_or_plugin_settings(token, monkeyp
     cleaned = bridge.clean_environ()
     assert "PATH_KEEP" in cleaned
     assert not [k for k in cleaned if k.startswith(bridge.UNSAFE_ENV_PREFIXES)]
+
+
+def test_start_stops_its_child_when_the_status_check_fails_during_startup(token, monkeypatch):
+    """While our new daemon is coming up, the port can be open before it answers the proof.
+    status() then raises; the child this process just started must not be left running."""
+    proc = FakeProc()
+    monkeypatch.setattr(bridge.subprocess, "Popen", lambda argv, **kw: proc)
+    calls = {"n": 0}
+
+    def status():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {}  # nothing on the port before the launch
+        raise ReachError("NEED_SETUP", bridge._FOREIGN[0], hint=bridge._FOREIGN[1])
+
+    monkeypatch.setattr(bridge, "status", status)
+    with pytest.raises(ReachError):
+        REAL_START()
+    assert proc.events and proc.events[0] == "terminate", "the child daemon is stopped"

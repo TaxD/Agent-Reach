@@ -54,7 +54,7 @@ def _parse_target(target: str):
 def _gh_get(path: str, timeout: float, accept: str = "application/vnd.github+json") -> bytes:
     try:
         out = run_cmd(
-            ["gh", "api", "-H", f"Accept: {accept}", path],
+            ["gh", "api", "--hostname", "github.com", "-H", f"Accept: {accept}", path],
             timeout=timeout,
             env=_GH_READ_ONLY_ENV,
         )
@@ -157,13 +157,15 @@ class GitHubChannel(Channel):
         # `is:public` plus the filter below: the user's token must never surface private repositories.
         path = "/search/repositories?" + urlencode({"q": f"{query} is:public", "per_page": limit})
         data = json.loads(get(path, timeout))
-        return [_repo_item(r) for r in data.get("items", []) if r.get("private") is False][:limit]
+        return [_repo_item(r) for r in data.get("items", [])
+                if r.get("private") is False and r.get("visibility", "public") == "public"][:limit]
 
     @staticmethod
     def _read(get, target: str, timeout: float) -> list:
         owner, repo, number = _parse_target(target)
         info = json.loads(get(f"/repos/{owner}/{repo}", timeout / 3))
-        if not isinstance(info, dict) or info.get("private") is not False:
+        if (not isinstance(info, dict) or info.get("private") is not False
+                or info.get("visibility", "public") != "public"):
             # Public content only. A token (gh login or github-token) raises rate limits;
             # it is not a way for the agent to read private repositories. Same answer
             # as a missing repository, so existence is not disclosed either.

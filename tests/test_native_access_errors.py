@@ -89,3 +89,30 @@ def test_github_missing_repo_and_readme_failures_stay_errors(monkeypatch, status
     assert out['error']['code'] == code
     assert out['items'] == []
     assert len(calls) == (1 if status == 404 else 2)
+
+
+def test_gh_always_targets_github_com(monkeypatch):
+    seen = []
+    monkeypatch.setattr(github, "run_cmd", lambda argv, **kw: seen.append((argv, kw)) or "{}")
+    github._gh_get("/repos/a/b", 5)
+    argv, kwargs = seen[0]
+    assert argv[:4] == ["gh", "api", "--hostname", "github.com"] and argv[-1] == "/repos/a/b"
+    assert kwargs["env"] == github._GH_READ_ONLY_ENV
+
+
+@pytest.mark.parametrize("visibility", ["internal", "private", "INTERNAL", ""])
+def test_github_returns_only_public_visibility(visibility):
+    from agent_reach.runtime.result import NOT_FOUND
+
+    repo = {"full_name": "corp/tool", "private": False, "visibility": visibility}
+
+    def get(path, timeout, accept=""):
+        if path.startswith("/search"):
+            return json.dumps({"items": [repo, {"full_name": "a/open", "private": False, "visibility": "public"},
+                                         {"full_name": "a/old", "private": False}]}).encode()
+        return json.dumps(repo).encode()
+
+    assert [i["title"] for i in github.GitHubChannel._search(get, "x", 5, 3)] == ["a/open", "a/old"]
+    with pytest.raises(ReachError) as err:
+        github.GitHubChannel._read(get, "corp/tool", 3)
+    assert err.value.code == NOT_FOUND

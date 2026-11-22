@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import http.client
 import os
-import re
 import signal
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
@@ -15,44 +16,12 @@ from typing import Mapping, Optional, Sequence
 from agent_reach import __version__
 from agent_reach.utils.process import utf8_subprocess_env, windows_hidden_kwargs
 
-from .result import BAD_INPUT, NEED_SETUP, TIMEOUT, ReachError, _clean
+from .result import NEED_SETUP, TIMEOUT, ReachError, _clean
 
 _DEFAULT_MAX_BYTES = 8 * 1024 * 1024
 _MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 # Some fronts (Exa's Cloudflare) block the default Python-urllib agent (error 1010).
 _USER_AGENT = f"agent-reach/{__version__}"
-_NPM_SHIM_SCRIPT = re.compile(r'"%dp0%\\(?P<script>[^"\r\n]*?\.(?:cjs|mjs|js))"', re.IGNORECASE)
-_CMD_METACHARS = frozenset('&|<>^()%!"\r\n')
-
-
-def _windows_argv(exe: str, args: Sequence[str], *, node: Optional[str]) -> list[str]:
-    """Avoid cmd.exe parsing arguments passed to Windows batch shims.
-
-    npm installs ``.cmd`` launchers even for JavaScript entry points. Running
-    their JS file with Node directly preserves arguments such as URLs containing
-    ``&``. Unknown batch files stay usable for ordinary arguments, but reject
-    cmd.exe metacharacters instead of silently splitting or expanding them.
-    """
-    if not exe.lower().endswith((".cmd", ".bat")):
-        return [exe, *args]
-
-    try:
-        shim = Path(exe).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        shim = ""
-    match = _NPM_SHIM_SCRIPT.search(shim)
-    if match and node and Path(node).is_file():
-        relative = match.group("script").replace("\\", os.sep)
-        script = Path(exe).parent / relative
-        if script.is_file():
-            return [node, str(script), *args]
-
-    if any(char in _CMD_METACHARS for arg in args for char in str(arg)):
-        raise ReachError(
-            BAD_INPUT,
-            f"{Path(exe).name} cannot safely receive arguments containing cmd.exe metacharacters",
-        )
-    return [exe, *args]
 
 
 class CommandFailed(ReachError):
@@ -95,8 +64,6 @@ def run_cmd(
     # children there so the API's hard deadline can stop the entire execution.
     supervised = os.environ.get("REACH_API_SUPERVISED") == "1"
     child_argv = [exe, *argv[1:]]
-    if sys.platform == "win32" and exe.lower().endswith((".cmd", ".bat")):
-        child_argv = _windows_argv(exe, argv[1:], node=resolve("node"))
     proc = subprocess.Popen(
         child_argv,
         stdout=subprocess.PIPE,
@@ -107,13 +74,8 @@ def run_cmd(
         start_new_session=(sys.platform != "win32" and not supervised),
         **windows_hidden_kwargs(),
     )
-    try:
-        kwargs = {"input": input_data.encode("utf-8")} if input_data is not None else {}
-        out, err = proc.communicate(timeout=max(timeout, 0.1), **kwargs)
-    except subprocess.TimeoutExpired:
+    def kill() -> None:
         if sys.platform == "win32":
-            # Kill this command's descendants too (Playwright driver + Chrome).
-            # Killing only Python leaves the profile locked by orphan browsers.
             taskkill = str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/taskkill.exe")
             try:
                 subprocess.run([taskkill, "/PID", str(proc.pid), "/T", "/F"],
@@ -129,19 +91,50 @@ def run_cmd(
         else:
             proc.kill()
         try:
-            proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            # A descendant may still own a pipe; never wait indefinitely.
-            if proc.stdout is not None:
-                proc.stdout.close()
-            if proc.stderr is not None:
-                proc.stderr.close()
             proc.wait(timeout=5)
-        raise ReachError(TIMEOUT, f"{name} did not finish within {timeout:.0f}s")
-    if len(out) > _MAX_OUTPUT_BYTES:
-        # ponytail: the output was already buffered; switch to a streaming read with a cap if a tool ever abuses this.
+        except subprocess.TimeoutExpired:
+            pass
+
+    # Both pipes are drained by threads with a byte budget each, so a chatty or hostile
+    # child cannot exhaust memory; going over the budget stops the child.
+    buffers = {"out": bytearray(), "err": bytearray()}
+    over = threading.Event()
+
+    def pump(stream, key: str) -> None:
+        try:
+            while True:
+                chunk = stream.read(65536)
+                if not chunk:
+                    return
+                if len(buffers[key]) + len(chunk) > _MAX_OUTPUT_BYTES:
+                    over.set()
+                    return
+                buffers[key] += chunk
+        except (OSError, ValueError):
+            return
+
+    readers = [threading.Thread(target=pump, args=(proc.stdout, "out"), daemon=True),
+               threading.Thread(target=pump, args=(proc.stderr, "err"), daemon=True)]
+    for reader in readers:
+        reader.start()
+    if input_data is not None and proc.stdin is not None:
+        try:
+            proc.stdin.write(input_data.encode("utf-8"))
+            proc.stdin.close()
+        except OSError:
+            pass
+    deadline = time.monotonic() + max(timeout, 0.1)
+    while proc.poll() is None and not over.is_set():
+        if time.monotonic() >= deadline:
+            kill()
+            raise ReachError(TIMEOUT, f"{name} did not finish within {timeout:.0f}s")
+        time.sleep(0.02)
+    for reader in readers:
+        reader.join(timeout=5)
+    if over.is_set():  # checked after the readers finished, so a late overflow is never returned as success
+        kill()
         raise ReachError("UPSTREAM_BROKEN", f"{name} produced more output than the {_MAX_OUTPUT_BYTES} byte limit")
+    out, err = bytes(buffers["out"]), bytes(buffers["err"])
     stdout = out.decode("utf-8", errors="replace")
     stderr = err.decode("utf-8", errors="replace")
     if proc.returncode != 0:
@@ -181,13 +174,13 @@ def http_request(
     data: Optional[bytes] = None,
     headers: Optional[Mapping[str, str]] = None,
     max_bytes: int = _DEFAULT_MAX_BYTES,
-    same_origin_redirects: bool = False,
+    same_origin_redirects: bool = True,
 ) -> bytes:
     """GET (or POST when `data` is given) with a size cap. Errors propagate to classify().
 
-    `same_origin_redirects`: for requests that carry a credential. urllib repeats every
-    header, Authorization included, on a redirect; this refuses any hop that leaves
-    the original scheme://host:port instead.
+    `same_origin_redirects` (default): a hop that leaves the original scheme://host:port is
+    refused. urllib would otherwise repeat every header and, for some redirects, the body
+    at whatever address the answering server names.
     """
     merged = {"User-Agent": _USER_AGENT}
     merged.update(headers or {})

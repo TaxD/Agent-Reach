@@ -1,6 +1,5 @@
 """The control socket, the CDP pipe and the watcher's commands, without a real Chrome."""
 
-import contextlib
 import json
 import os
 import shutil
@@ -255,19 +254,45 @@ class _FakeConn:
         return [m for m, _ in self.calls]
 
 
-def test_open_accepts_only_registered_login_pages(monkeypatch):
+def _turn_on(*names):
+    from agent_reach.runtime import state
+
+    state.mutate(lambda data: data["channels"].update({n: {"added_at": state.now()} for n in names}))
+
+
+BAD_CHANNELS = ["hackernews", "github", "web", "no-such-channel", "", None, 7, ["reddit"], {"name": "reddit"},
+                "https://www.reddit.com/login/", "reddit.com", "REDDIT", " reddit"]
+
+
+@pytest.mark.parametrize("channel", BAD_CHANNELS + ["reddit"])
+def test_open_refuses_anything_but_an_enabled_login_channel(monkeypatch, channel):
+    monkeypatch.setattr(browser, "touch", lambda: None)
+    _turn_on("hackernews", "github")  # turned on, but without a login
+    conn = _FakeConn([{"targetId": "P0", "url": "about:blank"}], [])
+    assert browser_watcher._open(conn, channel=channel) == {"ok": False, "error": "not an enabled login channel"}
+    assert browser_watcher._open(conn, url=RedditChannel().login_url)["ok"] is False, "a URL is not accepted"
+    assert conn.calls == []
+
+
+def test_open_uses_the_channels_own_login_page(monkeypatch):
+    monkeypatch.setattr(browser, "touch", lambda: None)
+    _turn_on("reddit", "twitter")
+    conn = _FakeConn([{"targetId": "P0", "url": "about:blank"}], [])
+    for ch in (RedditChannel(), TwitterChannel()):
+        assert browser_watcher._open(conn, channel=ch.name) == {"ok": True}
+    assert [p for m, p in conn.calls if m == "Target.createTarget"] == [
+        {"url": RedditChannel().login_url}, {"url": TwitterChannel().login_url}]
+
+
+def test_open_reads_the_enabled_channels_fresh_each_time(monkeypatch):
+    from agent_reach.runtime import state
+
     monkeypatch.setattr(browser, "touch", lambda: None)
     conn = _FakeConn([{"targetId": "P0", "url": "about:blank"}], [])
-    for url in ("https://evil.example/login", "https://www.reddit.com/login/?next=https://evil.example",
-                "javascript:alert(1)", "file:///etc/passwd", None, 7, ""):
-        assert browser_watcher._open(conn, url=url)["ok"] is False
-    # An unhashable url raises instead of returning not-ok; the control server turns that into an error reply.
-    with contextlib.suppress(TypeError):
-        assert browser_watcher._open(conn, url=["https://www.reddit.com/login/"])["ok"] is False
-    assert conn.calls == []
-    for ch in (RedditChannel(), TwitterChannel()):
-        assert browser_watcher._open(conn, url=ch.login_url) == {"ok": True}
-    assert conn.methods() == ["Target.createTarget", "Target.activateTarget"] * 2
+    _turn_on("reddit")
+    assert browser_watcher._open(conn, channel="reddit")["ok"] is True
+    state.mutate(lambda data: data["channels"].pop("reddit"))
+    assert browser_watcher._open(conn, channel="reddit")["ok"] is False, "a removed channel is refused at once"
 
 
 JAR = [
@@ -279,18 +304,20 @@ JAR = [
 ]
 
 
-@pytest.mark.parametrize("domains", [["evil.com"], ["reddit.com", "evil.com"], [], "reddit.com", None, [1],
-                                     ["com"], [".reddit.com"], ["REDDIT.COM"], ["sub.reddit.com"]])
-def test_clear_site_refuses_unregistered_or_malformed_domains(domains):
+@pytest.mark.parametrize("channel", BAD_CHANNELS + ["twitter"])
+def test_clear_site_refuses_anything_but_an_enabled_login_channel(channel):
+    _turn_on("reddit", "hackernews")
     conn = _FakeConn([{"targetId": "P0", "url": "https://www.reddit.com/"}], JAR)
-    assert browser_watcher._clear_site(conn, domains=domains) == {"ok": False, "error": "not a registered site"}
+    assert browser_watcher._clear_site(conn, channel=channel) == {"ok": False, "error": "not an enabled login channel"}
+    assert browser_watcher._clear_site(conn, domains=["reddit.com"])["ok"] is False, "domains are not accepted"
     assert conn.calls == [] and conn.cookies == JAR
 
 
 def test_clear_site_expires_only_that_sites_cookies_and_storage():
+    _turn_on("reddit", "twitter")
     pages = [{"targetId": "P0", "url": "https://www.reddit.com/r/x"}, {"targetId": "P1", "url": "https://x.com/home"}]
     conn = _FakeConn(pages, JAR)
-    assert browser_watcher._clear_site(conn, domains=["reddit.com"]) == {"ok": True, "cleared": 2}
+    assert browser_watcher._clear_site(conn, channel="reddit") == {"ok": True, "cleared": 2}
     assert [c["name"] for c in conn.cookies] == ["sid", "auth", "keep"]
     (expired,) = [p["cookies"] for m, p in conn.calls if m == "Storage.setCookies"]
     assert {(c["name"], c["domain"]) for c in expired} == {("session", ".reddit.com"), ("token", "www.reddit.com")}
@@ -303,16 +330,18 @@ def test_clear_site_expires_only_that_sites_cookies_and_storage():
 
 
 def test_clear_site_keeps_the_window_open_when_every_tab_was_that_site():
+    _turn_on("twitter")
     conn = _FakeConn([{"targetId": "P0", "url": "https://x.com/home"}], JAR)
-    assert browser_watcher._clear_site(conn, domains=["x.com"])["ok"] is True
+    assert browser_watcher._clear_site(conn, channel="twitter")["ok"] is True
     assert conn.methods().index("Target.createTarget") < conn.methods().index("Target.closeTarget")
     assert [p["url"] for p in conn.pages] == ["about:blank"]
     assert [c["name"] for c in conn.cookies] == ["session", "token", "sid", "keep"]
 
 
 def test_clear_site_reports_failure_when_cookies_survive():
+    _turn_on("reddit")
     conn = _FakeConn([{"targetId": "P0", "url": "about:blank"}], JAR, keep_cookies=True)
-    assert browser_watcher._clear_site(conn, domains=["reddit.com"]) == {
+    assert browser_watcher._clear_site(conn, channel="reddit") == {
         "ok": False, "error": "cleanup could not be verified"}
 
 

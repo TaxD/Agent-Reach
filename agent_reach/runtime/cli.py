@@ -360,13 +360,18 @@ def _cmd_management(head: str, args: Sequence[str]) -> int:
 def _apply_saved_proxy() -> None:
     """Use the proxy saved by `configure proxy` unless the shell already sets one."""
     # Local browser/MCP endpoints must never be sent through the outbound proxy.
-    bypass = list(dict.fromkeys(x.strip() for key in ("NO_PROXY", "no_proxy")
-                               for x in os.environ.get(key, "").split(",") if x.strip()))
-    for host in ("localhost", "127.0.0.1", "::1"):
-        if host not in bypass:
-            bypass.append(host)
-    os.environ["NO_PROXY"] = os.environ["no_proxy"] = ",".join(bypass)
-    if os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy"):
+    def exclude_loopback() -> None:
+        bypass = list(dict.fromkeys(x.strip() for key in ("NO_PROXY", "no_proxy")
+                                   for x in os.environ.get(key, "").split(",") if x.strip()))
+        for host in ("localhost", "127.0.0.1", "::1"):
+            if host not in bypass:
+                bypass.append(host)
+        os.environ["NO_PROXY"] = os.environ["no_proxy"] = ",".join(bypass)
+
+    # Only when a proxy comes from the environment. Setting NO_PROXY alone would make
+    # urllib ignore a proxy configured in the operating system.
+    if any(os.environ.get(k) for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")):
+        exclude_loopback()
         return
     try:
         from agent_reach.config import Config
@@ -376,6 +381,7 @@ def _apply_saved_proxy() -> None:
         return
     if proxy:
         os.environ["HTTPS_PROXY"] = os.environ["HTTP_PROXY"] = str(proxy)
+        exclude_loopback()
 
 
 def _login_info(ch: Channel):
@@ -412,7 +418,9 @@ def _cmd_login(args: Sequence[str]) -> int:
 
     try:
         with exclusive_browser():  # opening the window may start the browser
-            browser.start(ch.login_url)
+            if not manage.is_added(ch):  # turned off while this command waited
+                raise ReachError(NEED_SETUP, f"{ch.name} is not turned on")
+            browser.start(ch.name)
         state.mutate(lambda data: data.setdefault("session_revisions", {}).__setitem__(ch.name, state.now()))
     except ReachError as err:
         return _emit(envelope(channel=ch.name, action="login", error=err))
@@ -426,9 +434,13 @@ def _cmd_logout(args: Sequence[str]) -> int:
     except _ArgError as exc:
         return _bad_input(None, "logout", str(exc))
     from . import manage, state
+    from .browser_binding import exclusive_browser
 
     try:
-        cleared = browser.clear_site(manage.site_domains(ch))
+        with exclusive_browser():
+            if not manage.is_added(ch):  # turned off while this command waited
+                raise ReachError(NEED_SETUP, f"{ch.name} is not turned on")
+            cleared = browser.clear_site(ch.name)
     except ReachError as err:
         return _emit(envelope(channel=ch.name, action="logout", error=err))
 
@@ -458,6 +470,8 @@ def _cmd_browser(args: Sequence[str]) -> int:
 
     def run(fn):
         with exclusive_browser():
+            if fn is browser.setup and not any(ch.login_url and manage.is_added(ch) for ch in unified_channels()):
+                raise ReachError(NEED_SETUP, "no login channel is turned on")
             return fn()
     return _mgmt("browser " + ns.op, run, browser.setup if ns.op == "setup" else browser.stop)
 

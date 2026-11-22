@@ -314,9 +314,6 @@ def remove(name: str) -> dict:
     if not was_added:
         return {"channel": name, "removed": False, "removed_tools": [], "cleared_cookies": 0,
                 "browser_deleted": False, "warnings": []}
-    # Keep the registration and its tools until required login cleanup succeeds.
-    cookies = browser.clear_site(site_domains(ch)) if _uses_browser(ch) else 0
-    ch.on_remove()
     def forget(saved):
         saved["channels"].pop(name, None)
         saved["checks"].pop(name, None)
@@ -325,7 +322,21 @@ def remove(name: str) -> dict:
         for key in ("reuse_sources", "setup_failures", "backend_health", "cooldowns"):
             saved.get(key, {}).pop(name, None)
         saved.setdefault("session_revisions", {})[name] = state.now()
-    state.mutate(forget)
+
+    if _uses_browser(ch):
+        from .browser_binding import exclusive_browser
+
+        # One transaction: no query, login or logout of this channel can run between the
+        # cleanup and the moment the channel stops being enabled. The registration is
+        # kept if the cleanup fails.
+        with exclusive_browser():
+            cookies = browser.clear_site(name)
+            ch.on_remove()
+            state.mutate(forget)
+    else:
+        cookies = 0
+        ch.on_remove()
+        state.mutate(forget)
     return {"channel": name, "removed": True, "removed_tools": _prune(state.load()),
             "cleared_cookies": cookies, "browser_deleted": False, "warnings": []}
 
@@ -568,8 +579,9 @@ def _skills_dir_arg(skills_dir: str, verb: str) -> Path:
     if not target_dir.is_absolute():
         target_dir = Path.cwd() / target_dir
     if target_dir.name == SKILL_NAME:
+        # The hint is fixed text: a path from the caller is data and never part of an instruction.
         raise ReachError(BAD_INPUT, f"give the skills folder, not the {SKILL_NAME} folder inside it",
-                         hint=f"agent-reach skill {verb} {target_dir.parent}")
+                         hint="Pass the parent folder (the one that contains agent-reach).")
     return target_dir
 
 

@@ -41,6 +41,7 @@ MAX_CHUNKS = 24  # 4 hours at the standard 10-minute segment size
 MAX_TOTAL_CHUNK_BYTES = 96 * 1024 * 1024
 MAX_AUDIO_SECONDS = MAX_CHUNKS * CHUNK_SECONDS
 PROBE_TIMEOUT_SECONDS = 30
+_MAX_TRANSCRIPT_BYTES = 4 * 1024 * 1024
 
 PROVIDERS = {
     "groq": {
@@ -386,14 +387,19 @@ def transcribe_chunk(
                 files={"file": (chunk.name, fh, "audio/m4a")},
                 data={"model": info["model"], "response_format": "text"},
                 timeout=timeout,
+                allow_redirects=False,  # a redirect would resend the recording to another address
+                stream=True,
             )
+            body = resp.raw.read(_MAX_TRANSCRIPT_BYTES + 1, decode_content=True)
         except requests.RequestException as e:
             raise TranscribeError(f"{provider}: network error ({type(e).__name__})") from None
 
-    if not resp.ok:
+    if not 200 <= resp.status_code < 300:  # `ok` is also true for 3xx answers
         # The provider's error body can echo request details; report the status only.
         raise TranscribeError(f"{provider}: HTTP {resp.status_code}")
-    return resp.text
+    if len(body) > _MAX_TRANSCRIPT_BYTES:
+        raise TranscribeError(f"{provider}: transcript exceeds the size limit")
+    return body.decode("utf-8", errors="replace")
 
 
 def _provider_order(provider: str) -> List[str]:

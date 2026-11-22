@@ -8,6 +8,7 @@ URL before handing it to Jina Reader. Follow-up to #331 / #360 / #361,
 completing dedicated coverage for the channels that still lacked it.
 """
 
+import contextlib
 import http.client
 import json
 from unittest.mock import MagicMock, patch
@@ -37,7 +38,7 @@ def test_exa_request_identifies_agent_reach_not_python_urllib():
     resp.__enter__.return_value = resp
     resp.read.return_value = body
     resp.headers = {}
-    with patch("agent_reach.runtime.run.urllib.request.urlopen", return_value=resp) as urlopen:
+    with _opener(resp) as urlopen:
         _exa_call("web_search_exa", {"query": "q"}, 5)
     assert urlopen.call_args.args[0].get_header("User-agent").startswith("agent-reach/")
 
@@ -114,8 +115,19 @@ def test_web_missing_query_is_rejected_without_calling_exa():
     request.assert_not_called()
 
 
+@contextlib.contextmanager
+def _opener(response=None):
+    """Replace the redirect-checking opener that http_request builds; yields its open()."""
+    opener = MagicMock()
+    opener.open.return_value = response if response is not None else _resp()
+    with patch("agent_reach.runtime.run.urllib.request.build_opener", return_value=opener) as build:
+        yield opener.open
+    for call in build.call_args_list:
+        assert any(type(h).__name__ == "_SameOriginRedirects" for h in call.args), "same-origin redirects only"
+
+
 def _resp(body=b"# Example\nfull text\n"):
-    """A urlopen() return value usable as a context manager."""
+    """An opened response usable as a context manager."""
     cm = MagicMock()
     cm.__enter__.return_value.read.return_value = body
     return cm
@@ -144,7 +156,7 @@ def test_can_handle_accepts_any_url():
 
 def test_read_prepends_https_for_schemeless_url():
     channel = WebChannel()
-    with patch("urllib.request.urlopen", return_value=_resp()) as mock_open:
+    with _opener(_resp()) as mock_open:
         out = channel.read("example.com/article")
     req = mock_open.call_args.args[0]
     assert req.full_url == "https://r.jina.ai/https://example.com/article"
@@ -153,7 +165,7 @@ def test_read_prepends_https_for_schemeless_url():
 
 def test_read_preserves_existing_http_scheme():
     channel = WebChannel()
-    with patch("urllib.request.urlopen", return_value=_resp()) as mock_open:
+    with _opener(_resp()) as mock_open:
         channel.read("http://example.com")
     req = mock_open.call_args.args[0]
     # http:// must be kept as-is, not coerced to https:// nor double-prefixed.
@@ -162,7 +174,7 @@ def test_read_preserves_existing_http_scheme():
 
 def test_read_preserves_existing_https_scheme():
     channel = WebChannel()
-    with patch("urllib.request.urlopen", return_value=_resp()) as mock_open:
+    with _opener(_resp()) as mock_open:
         channel.read("https://example.com/deep/path")
     req = mock_open.call_args.args[0]
     assert req.full_url == "https://r.jina.ai/https://example.com/deep/path"
@@ -170,7 +182,7 @@ def test_read_preserves_existing_https_scheme():
 
 def test_read_sends_expected_headers_and_timeout():
     channel = WebChannel()
-    with patch("urllib.request.urlopen", return_value=_resp()) as mock_open:
+    with _opener(_resp()) as mock_open:
         channel.read("https://example.com")
     req = mock_open.call_args.args[0]
     assert req.headers == {"User-agent": _UA, "Accept": "text/plain"}
@@ -179,7 +191,7 @@ def test_read_sends_expected_headers_and_timeout():
 
 def test_read_decodes_utf8_body():
     channel = WebChannel()
-    with patch("urllib.request.urlopen", return_value=_resp("café ☕\n".encode("utf-8"))):
+    with _opener(_resp("café ☕\n".encode("utf-8"))):
         out = channel.read("https://example.com")
     assert out == "café ☕\n"
 
@@ -213,7 +225,7 @@ def test_read_decodes_utf8_body():
 def test_read_rejects_non_public_urls_before_network(url):
     channel = WebChannel()
 
-    with patch("urllib.request.urlopen") as mock_open:
+    with _opener() as mock_open:
         with pytest.raises(ValueError, match="public HTTP"):
             channel.read(url)
 
@@ -223,7 +235,7 @@ def test_read_rejects_non_public_urls_before_network(url):
 @pytest.mark.parametrize("url", ["https://8.8.8.8/page", "http://010.010.010.010/page"])
 def test_read_allows_public_literal_addresses(url):
     channel = WebChannel()
-    with patch("urllib.request.urlopen", return_value=_resp()) as mock_open:
+    with _opener(_resp()) as mock_open:
         channel.read(url)
     mock_open.assert_called_once()
 
@@ -232,7 +244,7 @@ def test_read_accepts_response_at_exact_size_limit():
     channel = WebChannel()
     response = _resp(b"x" * _MAX_RESPONSE_BYTES)
 
-    with patch("urllib.request.urlopen", return_value=response):
+    with _opener(response):
         out = channel.read("https://example.com/exact")
 
     assert len(out) == _MAX_RESPONSE_BYTES
@@ -245,7 +257,7 @@ def test_read_rejects_oversized_reader_response():
     channel = WebChannel()
     response = _resp(b"x" * (_MAX_RESPONSE_BYTES + 1))
 
-    with patch("urllib.request.urlopen", return_value=response):
+    with _opener(response):
         with pytest.raises(ValueError, match="response exceeds"):
             channel.read("https://example.com/large")
 
@@ -273,9 +285,7 @@ def test_read_rejects_oversized_reader_response():
 def test_read_rejects_high_confidence_antibot_pages(body):
     channel = WebChannel()
 
-    with patch(
-        "urllib.request.urlopen", return_value=_resp(body.encode("utf-8"))
-    ) as mock_open:
+    with _opener(_resp(body.encode("utf-8"))) as mock_open:
         with pytest.raises(RuntimeError, match="anti-bot"):
             channel.read("https://example.com/protected")
 
@@ -296,7 +306,7 @@ def test_read_rejects_high_confidence_antibot_pages(body):
 def test_read_does_not_reject_single_generic_antibot_terms(body):
     channel = WebChannel()
 
-    with patch("urllib.request.urlopen", return_value=_resp(body.encode("utf-8"))):
+    with _opener(_resp(body.encode("utf-8"))):
         assert channel.read("https://example.com/article") == body
 
 
@@ -309,5 +319,23 @@ def test_antibot_detection_has_a_fixed_scan_window():
         + "## Performing security verification\n"
     )
 
-    with patch("urllib.request.urlopen", return_value=_resp(body.encode("utf-8"))):
+    with _opener(_resp(body.encode("utf-8"))):
         assert channel.read("https://example.com/long-article") == body
+
+
+def test_jina_redirect_to_another_origin_is_refused():
+    import urllib.request
+
+    from agent_reach.runtime.result import ReachError
+    from agent_reach.runtime.run import _SameOriginRedirects
+
+    class Body:
+        def close(self):
+            pass
+
+    handler = _SameOriginRedirects("https://r.jina.ai/https://example.com")
+    req = urllib.request.Request("https://r.jina.ai/https://example.com")
+    assert handler.redirect_request(req, Body(), 302, "Found", {}, "https://r.jina.ai/other") is not None
+    for target in ("http://127.0.0.1/", "https://evil.example/", "http://r.jina.ai/x"):
+        with pytest.raises(ReachError):
+            handler.redirect_request(req, Body(), 302, "Found", {}, target)

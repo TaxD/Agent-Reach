@@ -177,7 +177,9 @@ def _node_version() -> tuple:
     if not node:
         return ()
     try:
-        out = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=20).stdout
+        clean = {k: v for k, v in os.environ.items() if not k.startswith(("NODE_", "npm_", "NPM_", "OPENCLI_"))}
+        out = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=20, env=clean,
+                             cwd=os.path.expanduser("~")).stdout
     except (OSError, subprocess.TimeoutExpired):
         return ()
     m = re.search(r"(\d+)\.(\d+)\.(\d+)", out)

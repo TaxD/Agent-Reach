@@ -28,3 +28,21 @@ def test_empty_config_still_loads_as_an_empty_mapping(tmp_path, payload):
     path = tmp_path / "config.yaml"
     path.write_text(payload, encoding="utf-8")
     assert Config(path).data == {}
+
+
+@pytest.mark.parametrize("payload", [
+    "groq_api_key: !!bool gsk_secret_value_123\n",
+    "openai_api_key: !!int sk-secret-value-456\n",
+    "proxy: !!float http://user:pw-secret@proxy.example\n",
+    "github_token: !!timestamp ghp_secret_789\n",
+    "x: !!python/object/apply:os.system ['echo secret-pwned']\n",
+    "groq_api_key: !!binary gsk_secret_not_base64!!\n",
+])
+def test_loader_errors_never_quote_the_file(tmp_path, payload):
+    path = tmp_path / "config.yaml"
+    path.write_text(payload, encoding="utf-8")
+    with pytest.raises(ConfigError) as caught:
+        Config(path)
+    assert "secret" not in str(caught.value) and "pw-" not in str(caught.value)
+    assert caught.value.__cause__ is None and caught.value.__suppress_context__, "no chained loader message is shown"
+    assert path.read_text(encoding="utf-8") == payload

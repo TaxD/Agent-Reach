@@ -7,8 +7,8 @@ socket (cdp.ControlServer) and closes everything after the idle limit. Only
 Agent Reach commands count as use; nothing a web page does can keep it open.
 
 It is the only process that can talk to Chrome. It never returns cookie
-values to anyone: the control commands are ping, open (a channel's login page),
-clear_site (a channel's own domains) and close.
+values to anyone: the control commands are ping, open (the login page of an
+enabled login channel, by name), clear_site (that channel's own site) and close.
 """
 
 from __future__ import annotations
@@ -85,20 +85,25 @@ def _context_id(conn: PipeConnection) -> Optional[str]:
     return None
 
 
-def _login_pages() -> dict:
-    """login URL -> cookie domains, for the channels that have a login."""
+def _enabled_login_channel(name: object):
+    """The channel called `name` if it has a login and the user turned it on (read fresh each time)."""
     from agent_reach.channels import get_all_channels
 
-    from .manage import site_domains
+    from . import state
+    from .manage import is_added
 
-    return {ch.login_url: site_domains(ch) for ch in get_all_channels() if ch.login_url}
+    if not isinstance(name, str):
+        return None
+    data = state.load()
+    return next((ch for ch in get_all_channels() if ch.name == name and ch.login_url and is_added(ch, data)), None)
 
 
-def _open(conn: PipeConnection, url: object = None, **_ignored) -> dict:
-    """Open a registered channel's login page in a new tab and bring it to the front."""
-    if not isinstance(url, str) or url not in _login_pages():
-        return {"ok": False, "error": "not a registered login page"}
-    reply = conn.call("Target.createTarget", {"url": url})
+def _open(conn: PipeConnection, channel: object = None, **_ignored) -> dict:
+    """Open the login page of one enabled login channel in a new tab and bring it to the front."""
+    ch = _enabled_login_channel(channel)
+    if ch is None:
+        return {"ok": False, "error": "not an enabled login channel"}
+    reply = conn.call("Target.createTarget", {"url": ch.login_url})
     target = (reply.get("result") or {}).get("targetId")
     if not target:
         return {"ok": False, "error": "could not open a tab"}
@@ -107,11 +112,14 @@ def _open(conn: PipeConnection, url: object = None, **_ignored) -> dict:
     return {"ok": True}
 
 
-def _clear_site(conn: PipeConnection, domains: object = None, **_ignored) -> dict:
-    """Log one registered site out of the profile: close its tabs, expire its cookies, clear its storage."""
-    allowed = {d for group in _login_pages().values() for d in group}
-    if not isinstance(domains, list) or not domains or not all(isinstance(d, str) and d in allowed for d in domains):
-        return {"ok": False, "error": "not a registered site"}
+def _clear_site(conn: PipeConnection, channel: object = None, **_ignored) -> dict:
+    """Log one enabled login channel's site out of the profile: close its tabs, expire its cookies, clear its storage."""
+    from .manage import site_domains
+
+    ch = _enabled_login_channel(channel)
+    if ch is None:
+        return {"ok": False, "error": "not an enabled login channel"}
+    domains = site_domains(ch)
 
     def host(url: str) -> str:
         return urlsplit(url).hostname or ""
@@ -129,6 +137,7 @@ def _clear_site(conn: PipeConnection, domains: object = None, **_ignored) -> dic
     if not isinstance(cookies, list):
         return {"ok": False, "error": "could not inspect site data"}
     doomed = [c for c in cookies if isinstance(c, dict) and ours(str(c.get("domain", "")))]
+    del cookies  # other sites' cookies are not kept around
     keys = ("name", "domain", "path", "secure", "httpOnly", "sameSite", "partitionKey", "sourceScheme", "sourcePort")
     expired = [{**{k: c[k] for k in keys if k in c}, "value": "", "expires": 1} for c in doomed]
     if expired and "result" not in conn.call("Storage.setCookies", {"cookies": expired}):

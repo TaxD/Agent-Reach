@@ -58,6 +58,13 @@ def _within_budget(items: list) -> tuple:
 
     total = 0
     kept: list = []
+    if items and isinstance(items[0], dict):
+        # The first item is always returned, so it is cut down to the budget itself
+        # (a channel may have enlarged it after it was normalized).
+        first = items[0]
+        if isinstance(first.get("text"), str) and len(first["text"]) > MAX_TEXT_CHARS:
+            first["text"] = first["text"][:MAX_TEXT_CHARS] + " …(truncated)"
+        first["raw"] = _bounded_raw(first.get("raw"))
     for item in items:
         try:
             size = len(json.dumps(item, ensure_ascii=False, default=str))
@@ -166,7 +173,9 @@ def envelope(
 ) -> dict:
     """Build the unified output object."""
     kept, dropped = _within_budget(list(items or [])) if error is None else ([], 0)
-    meta: dict = {"elapsed_ms": elapsed_ms, "attempts": list(attempts or [])}
+    meta: dict = {"elapsed_ms": elapsed_ms, "attempts": [
+        {**row, "message": _clean(row["message"])} if isinstance(row, dict) and isinstance(row.get("message"), str) else row
+        for row in (attempts or [])]}
     if dropped:
         meta["truncated"] = {"dropped_items": dropped, "reason": f"output exceeded {MAX_OUTPUT_CHARS} characters"}
     return {
@@ -181,7 +190,8 @@ def envelope(
         if error is None
         else {
             "code": error.code,
-            "message": error.message,
+            # Last boundary for third-party text: credentials in URLs are masked and length is capped.
+            "message": _clean(error.message),
             "hint": error.hint or DEFAULT_HINTS.get(error.code, ""),
         },
     }

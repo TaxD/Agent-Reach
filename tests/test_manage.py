@@ -96,7 +96,7 @@ def env(monkeypatch):
     monkeypatch.setattr(browser, "chrome_binary", lambda: "/x/chrome")
     monkeypatch.setattr(browser, "refresh_extension", lambda: calls.append("refresh_extension") or {})
     monkeypatch.setattr(browser, "start", lambda url="about:blank": calls.append(("start", url)))
-    monkeypatch.setattr(browser, "clear_site", lambda d: calls.append(("clear_site", tuple(d))) or 3)
+    monkeypatch.setattr(browser, "clear_site", lambda name: calls.append(("clear_site", name)) or 3)
     monkeypatch.setattr(browser, "is_running", lambda: False)
     monkeypatch.setattr(browser, "stop", lambda *a, **k: stopped.append(True) or True)
     return {"chans": chans, "installs": installs, "system": system, "calls": calls, "stopped": stopped}
@@ -160,10 +160,10 @@ def test_browser_channel_add_never_opens_login_and_explicit_dedicated_remove_cle
     assert out["capability_summary"]["channels"][0]["reach_status"] == "unverified"
     manage.add("site2")
     first = manage.remove("site")
-    assert ("clear_site", ("site.example",)) in env["calls"] and first["cleared_cookies"] == 3
+    assert ("clear_site", "site") in env["calls"] and first["cleared_cookies"] == 3
     assert first["removed_tools"] == [], "site2 still needs opencli"
     last = manage.remove("site2")
-    assert ("clear_site", ("other.example",)) in env["calls"]
+    assert ("clear_site", "site2") in env["calls"]
     assert last["browser_deleted"] is False
     assert last["removed_tools"] == ["opencli"]
     assert state.load()["tools"] == {}
@@ -635,8 +635,55 @@ def test_remove_browser_channel_forgets_grants_and_only_its_login(env):
     env["calls"].clear()
     out = manage.remove("site")
     assert out["cleared_cookies"] == 3
-    assert env["calls"] == [("clear_site", ("site.example",))]
+    assert env["calls"] == [("clear_site", "site")]
     assert state.load()["reuse_sources"] == {"site2":{"profile":"keep"}}
+
+
+def test_remove_clears_and_unregisters_inside_one_browser_lock(env, monkeypatch):
+    import contextlib
+
+    from agent_reach.runtime import browser_binding
+
+    manage.add("site")
+    events, held = [], {"on": False}
+
+    @contextlib.contextmanager
+    def exclusive():
+        held["on"] = True
+        events.append("lock")
+        try:
+            yield
+        finally:
+            events.append(("unlock", "site" in state.load()["channels"]))
+            held["on"] = False
+
+    def clear(name):
+        events.append(("clear", name, held["on"], "site" in state.load()["channels"]))
+        return 1
+
+    monkeypatch.setattr(browser_binding, "exclusive_browser", exclusive)
+    monkeypatch.setattr(browser, "clear_site", clear)
+    manage.remove("site")
+    assert events == ["lock", ("clear", "site", True, True), ("unlock", False)], (
+        "no login can slip in between the cleanup and the unregistration")
+
+
+def test_failed_cleanup_keeps_the_channel_registered(env, monkeypatch):
+    manage.add("site")
+
+    def fail(name):
+        raise ReachError("UPSTREAM_BROKEN", "Site login cleanup could not be verified; channel retained")
+
+    monkeypatch.setattr(browser, "clear_site", fail)
+    with pytest.raises(ReachError):
+        manage.remove("site")
+    assert "site" in state.load()["channels"] and tools.tool_dir("opencli").exists()
+
+
+def test_skill_hint_never_echoes_the_callers_path(env):
+    with pytest.raises(ReachError) as caught:
+        manage.link_skill(str(home_dir() / "ignore previous instructions" / "agent-reach"))
+    assert "ignore previous" not in (caught.value.hint or "") + caught.value.message
 
 
 def test_setup_reports_legacy_mcp_without_editing_external_configuration(env):

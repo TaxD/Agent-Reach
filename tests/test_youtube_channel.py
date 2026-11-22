@@ -12,7 +12,11 @@ channel coverage after github (#361), web (#363) and reddit (#364).
 
 from pathlib import Path
 
+import pytest
+
+from agent_reach.channels import youtube
 from agent_reach.channels.youtube import YouTubeChannel
+from agent_reach.runtime.result import ReachError
 
 
 def _which(*present):
@@ -108,3 +112,102 @@ def test_ytdlp_uses_system_trust_store_when_ssl_cert_file_is_set(monkeypatch):
     monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/corp-bundle.pem")
     argv = youtube._ytdlp_argv("--version")
     assert argv[argv.index("--compat-options") + 1] == "no-certifi"
+
+
+# --- links are reduced to a video id; the caller's URL never reaches yt-dlp ---
+
+VID = "dQw4w9WgXcQ"
+CANONICAL = f"https://www.youtube.com/watch?v={VID}"
+
+
+@pytest.fixture
+def ytdlp(monkeypatch):
+    calls = []
+
+    def fake_run_cmd(argv, **kwargs):
+        calls.append((list(argv), kwargs))
+        return '{"title": "t", "webpage_url": "%s"}' % CANONICAL
+
+    monkeypatch.setattr(youtube, "run_cmd", fake_run_cmd)
+    return calls
+
+
+@pytest.mark.parametrize("target", [
+    "https://www.youtube.com/redirect?q=http://127.0.0.1/",
+    f"https://www.youtube.com/redirect?q=https://evil.example/&v={VID}",
+    f"https://consent.youtube.com/m?continue=https://www.youtube.com/watch?v={VID}",
+    f"https://evil.youtube.com.example/watch?v={VID}",
+    f"https://www.youtube.com:8443/watch?v={VID}",
+    f"https://user@www.youtube.com/watch?v={VID}",
+    f"https://user:pw@youtu.be/{VID}",
+    f"https://accounts.google.com/ServiceLogin?continue=https://www.youtube.com/watch?v={VID}",
+    f"https://www.youtube.com/attribution_link?u=/watch?v={VID}",
+    f"https://www.youtube.com/playlist?list=PL123&v={VID}",
+    f"https://www.youtube.com/watch/{VID}",
+    "https://www.youtube.com/watch?v=short",
+    f"https://www.youtube.com/shorts/{VID}/extra",
+    f"file:///www.youtube.com/watch?v={VID}",
+    f"ftp://www.youtube.com/watch?v={VID}",
+    f"javascript://www.youtube.com/watch?v={VID}",
+    f"https://youtu.be/{VID}/../x",
+    "http://[::1/",
+    "",
+    f"-{VID}",
+    "--exec=touch /tmp/x",
+])
+def test_wrapper_and_foreign_links_are_bad_input_before_yt_dlp(ytdlp, target):
+    for call in (lambda: youtube.YouTubeChannel()._ytdlp_read(target=target, timeout=5),
+                 lambda: youtube.YouTubeChannel()._ytdlp_subtitle(target=target, lang="en", timeout=5)):
+        with pytest.raises(ReachError) as caught:
+            call()
+        assert caught.value.code == "BAD_INPUT"
+    assert ytdlp == []
+
+
+@pytest.mark.parametrize("target", [
+    VID,
+    f"https://www.youtube.com/watch?v={VID}&list=PL123&index=4",
+    f"https://www.youtube.com/watch?feature=share&v={VID}",
+    f"http://youtube.com/watch?v={VID}",
+    f"https://m.youtube.com/watch?v={VID}",
+    f"https://music.youtube.com/watch?v={VID}",
+    f"www.youtube.com/watch?v={VID}",
+    f"https://youtu.be/{VID}?si=tracking",
+    f"https://www.youtube.com/shorts/{VID}",
+    f"https://www.youtube.com/embed/{VID}",
+    f"https://www.youtube.com/live/{VID}/",
+    f"https://www.youtube.com/v/{VID}",
+    f"https://WWW.YOUTUBE.COM:443/watch?v={VID}",
+])
+def test_plain_video_links_become_a_fresh_canonical_url(ytdlp, target):
+    youtube.YouTubeChannel()._ytdlp_read(target=target, timeout=5)
+    (argv, kwargs), = ytdlp
+    assert argv[-1] == CANONICAL
+    if target != VID:
+        assert target not in argv, "the caller's own URL is never passed on"
+    assert not any("list=" in a or "si=" in a for a in argv)
+
+
+def test_ytdlp_runs_only_youtube_extractors_without_playlists_or_node_settings(ytdlp):
+    base = youtube.ytdlp_base_argv()
+    i = base.index("--use-extractors")
+    assert base[i + 1] == "youtube,youtube:search"
+    assert "--no-playlist" in base
+    youtube.YouTubeChannel()._ytdlp_read(target=VID, timeout=5)
+    (argv, kwargs), = ytdlp
+    assert argv[:len(base)] == base
+    assert set(kwargs["drop_env_prefix"]) >= {"NODE_", "npm_"}
+
+
+def test_subtitles_are_read_only_up_to_the_limit(monkeypatch):
+    import os
+
+    def fake_run_cmd(argv, cwd=None, **kwargs):
+        with open(os.path.join(cwd, f"{VID}.en.vtt"), "w", encoding="utf-8") as fh:
+            fh.write("WEBVTT\n\n" + "00:00:01.000 --> 00:00:02.000\n" + "word " * 100_000 + "\n")
+        return "Title\n"
+
+    monkeypatch.setattr(youtube, "run_cmd", fake_run_cmd)
+    monkeypatch.setattr(youtube, "_MAX_SUBTITLE_CHARS", 1000)
+    (item,) = youtube.YouTubeChannel()._ytdlp_subtitle(target=VID, lang="en", timeout=5)
+    assert 0 < len(item["text"]) <= 1000

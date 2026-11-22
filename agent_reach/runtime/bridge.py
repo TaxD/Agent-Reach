@@ -25,6 +25,7 @@ from . import tools
 from .result import NEED_SETUP, ReachError
 
 URL = "http://127.0.0.1:19825"
+_MAX_STATUS_BYTES = 256 * 1024
 _FOREIGN = ("Another OpenCLI daemon is already using port 19825; left it unchanged",
             "Ask the user to stop their own OpenCLI (`opencli daemon stop`), then retry. Reach will not stop it.")
 
@@ -113,9 +114,13 @@ def daemon_is_ours() -> bool:
 
 
 def _something_listens() -> bool:
+    """Whether anything accepts connections on the daemon port, whatever it then says."""
+    import socket
+
     try:
-        return bool(_open("/ping", {}))
-    except (OSError, ValueError):
+        with socket.create_connection(("127.0.0.1", 19825), timeout=1):
+            return True
+    except OSError:
         return False
 
 
@@ -143,9 +148,11 @@ def _signed_get(path: str):
     request = urllib.request.Request(URL + path, headers={
         "X-OpenCLI": "1", "Authorization": signature("GET", path), "X-OpenCLI-Challenge": challenge})
     with opener.open(request, timeout=2) as response:
-        body = response.read(256 * 1024)
+        body = response.read(_MAX_STATUS_BYTES + 1)
         proof = response.headers.get("X-OpenCLI-Proof") or ""
         code = response.status
+    if len(body) > _MAX_STATUS_BYTES:
+        raise ValueError("the daemon's answer exceeds the size limit")
     message = "\n".join(["opencli-response", challenge, str(code), hashlib.sha256(body).hexdigest()])
     expected = hmac.new(_token(), message.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(proof, expected):
@@ -159,7 +166,12 @@ def launch_spec() -> tuple[list[str], str]:
     daemon, package = root / "dist" / "src" / "daemon.js", root / "package.json"
     if not node or not daemon.is_file() or not package.is_file():
         raise ReachError(NEED_SETUP, "Run agent-reach add CHANNEL to install the pinned OpenCLI")
-    return [node, str(daemon)], str(json.loads(package.read_text("utf-8"))["version"])
+    version = str(json.loads(package.read_text("utf-8")).get("version"))
+    if version != tools.locked_opencli_version():
+        # An older private copy (left by an earlier Agent Reach) is never executed.
+        raise ReachError(NEED_SETUP, "The installed OpenCLI is not the version this Agent Reach pins",
+                         hint="Run `agent-reach update --sync-only` to install the pinned version, then retry.")
+    return [node, str(daemon)], version
 
 
 def require_running() -> dict:
@@ -184,15 +196,22 @@ def start():
     proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                             env={**clean_environ(), **settings}, cwd=settings["HOME"])
     deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        current = status()
-        if current:
-            if current.get("pid") == proc.pid and current.get("daemonVersion") == version:
-                return proc
-            break  # something else answers with our token: refuse rather than adopt it
-        if proc.poll() is not None:
-            break
-        time.sleep(0.1)
+    try:
+        while time.monotonic() < deadline:
+            try:
+                current = status()
+            except ReachError:
+                current = {}  # the port is open but the proof is not served yet; keep waiting
+            if current:
+                if current.get("pid") == proc.pid and current.get("daemonVersion") == version:
+                    return proc
+                break  # something else answers with our token: refuse rather than adopt it
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+    except BaseException:
+        close(proc)  # whatever happens, the child we started never outlives a failed start
+        raise
     close(proc)
     raise ReachError(NEED_SETUP, "The OpenCLI daemon could not start alongside the dedicated browser",
                      hint="Port 19825 may be in use by another program.")

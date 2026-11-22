@@ -71,6 +71,9 @@ def opencli_call(site: str, command: str, values=(), *, limit=None, timeout: flo
     values = [str(v) for v in values]
     if command not in READ_ONLY.get(site, ()) or any(v.startswith("-") or not v for v in values):
         raise ReachError(BAD_INPUT, "arguments must not be empty or start with '-'")
+    from agent_reach.runtime import bridge
+
+    bridge.launch_spec()  # refuses an OpenCLI that is not the pinned version, before the CLI runs
     env = environment(site)
     options = ["--limit", str(int(limit))] if limit is not None else []
     argv = ["opencli", site, command, *options, "-f", "json", "--", *values]

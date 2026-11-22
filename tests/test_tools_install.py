@@ -177,3 +177,26 @@ def test_node_at_the_minimum_is_the_users_own(monkeypatch):
     monkeypatch.setattr(tools, "_node_version", lambda: tools.NODE_MINIMUM)
     assert tools.ensure("node") == {"tool": "node", "owner": "system", "scope": "system", "version": "20.18.1"}
     assert tools.TOOLS["node"].kind == "system"
+
+
+def test_node_version_probe_runs_with_a_cleaned_environment(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("NODE_OPTIONS", "--require /tmp/evil.js")
+    monkeypatch.setenv("npm_config_prefix", "/tmp/evil")
+    monkeypatch.setenv("OPENCLI_DAEMON_PORT", "1")
+    monkeypatch.setenv("KEEP_ME", "1")
+    monkeypatch.setattr(tools.shutil, "which", lambda c, *a, **k: "/usr/bin/node" if c == "node" else None)
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(argv=argv, **kwargs)
+        return SimpleNamespace(stdout="v22.11.0\n")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+    assert tools._node_version() == (22, 11, 0)
+    assert seen["argv"] == ["/usr/bin/node", "--version"]
+    assert not any(k.startswith(("NODE_", "npm_", "NPM_", "OPENCLI_")) for k in seen["env"])
+    assert seen["env"]["KEEP_ME"] == "1"
+    assert seen["cwd"] != str(tmp_path), "never runs in the agent's project folder"

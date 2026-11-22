@@ -121,11 +121,18 @@ def test_guarded_connect_refuses_mixed_public_and_private_answers(monkeypatch):
         _public._connect_public(("mixed.example.org", 80))
 
 
+class _Closable:
+    closed = False
+
+    def close(self):
+        self.closed = True
+
+
 def test_redirects_are_revalidated():
     handler = _public._PublicRedirectHandler()
     for target in ("http://127.0.0.1/", "file:///etc/passwd", "https://example.org:22/"):
         with pytest.raises(ReachError):
-            handler.redirect_request(None, None, 302, "Found", {}, target)
+            handler.redirect_request(None, _Closable(), 302, "Found", {}, target)
 
 
 def test_public_unicast_accepts_ordinary_addresses_only():
@@ -394,3 +401,98 @@ def test_the_daemon_port_is_never_followed_through_a_redirect():
     with pytest.raises(OSError):
         bridge._NoRedirects().redirect_request(None, body, 302, "Found", {}, "http://evil.example/")
     assert body.closed
+
+
+_PROXY_KEYS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy")
+
+
+def _proxies(monkeypatch, **values):
+    import urllib.request
+
+    for key in _PROXY_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(urllib.request, "getproxies", urllib.request.getproxies_environment)
+
+
+def test_proxy_use_is_decided_per_request(monkeypatch):
+    _proxies(monkeypatch)
+    assert _public._uses_proxy("https://example.org/feed") is False
+    _proxies(monkeypatch, https_proxy="http://127.0.0.1:7890")
+    assert _public._uses_proxy("https://example.org/feed") is True
+    assert _public._uses_proxy("http://example.org/feed") is False, "no proxy for this scheme"
+    _proxies(monkeypatch, https_proxy="http://127.0.0.1:7890", no_proxy="example.org")
+    assert _public._uses_proxy("https://example.org/feed") is False
+    assert _public._uses_proxy("https://other.example/feed") is True
+
+
+def test_a_proxied_request_is_never_redirected_to_another_host():
+    import urllib.request
+
+    class Body:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    req = urllib.request.Request("https://example.org/feed")
+    proxied = _public._PublicRedirectHandler(same_host_only=True)
+    assert proxied.redirect_request(req, Body(), 302, "Found", {}, "https://example.org/next") is not None
+    for target in ("https://evil.example/feed", "http://example.org/feed", "https://example.org:8443/feed",
+                   "https://sub.example.org/feed"):
+        with pytest.raises(ReachError):
+            proxied.redirect_request(req, Body(), 302, "Found", {}, target)
+    direct = _public._PublicRedirectHandler()
+    assert direct.redirect_request(req, Body(), 302, "Found", {}, "https://evil.example/feed") is not None
+
+
+def test_get_bytes_through_a_proxy_refuses_a_cross_host_redirect(monkeypatch):
+    import io
+    import urllib.request
+
+    _proxies(monkeypatch, https_proxy="http://127.0.0.1:7890")
+    seen = []
+
+    class Redirecting(urllib.request.BaseHandler):
+        handler_order = 100
+
+        def https_open(self, req):
+            import http.client
+
+            seen.append((req.full_url, req.host))
+            headers = http.client.HTTPMessage()
+            headers["Location"] = "https://evil.example/x"
+            resp = urllib.request.addinfourl(io.BytesIO(b""), headers, req.full_url, 302)
+            resp.msg = "Found"
+            return resp
+
+    real_init = urllib.request.OpenerDirector.__init__
+
+    def init(self):
+        real_init(self)
+        self.add_handler(Redirecting())
+
+    monkeypatch.setattr(urllib.request.OpenerDirector, "__init__", init)
+    with pytest.raises(ReachError, match="another host"):
+        _public.get_bytes("https://example.org/feed", 1)
+    assert seen == [("https://example.org/feed", "example.org")]
+    assert all("evil.example" not in url for url, _ in seen)
+
+
+@pytest.mark.parametrize("env", [{"ALL_PROXY": "http://127.0.0.1:7890"}, {"all_proxy": "socks5://127.0.0.1:1080"}])
+def test_an_all_proxy_setting_does_not_turn_off_address_pinning(monkeypatch, env):
+    """urllib's ProxyHandler never uses an "all" proxy for http/https, so such a request goes out directly;
+    it must still be pinned to a public address."""
+    _proxies(monkeypatch, **env)
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 443))])
+    connected = []
+
+    def connect(address, *a, **k):
+        connected.append(address)
+        raise OSError("blocked by the test")
+
+    monkeypatch.setattr(socket, "create_connection", connect)
+    with pytest.raises((ReachError, OSError)):
+        _public.get_bytes("https://rebind.example.org/api", 1)
+    assert connected == [], "connected to a name that resolves to loopback"

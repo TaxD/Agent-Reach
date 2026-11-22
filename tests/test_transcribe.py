@@ -37,14 +37,31 @@ def bounded_audio_duration(monkeypatch):
     monkeypatch.setattr(tr, "_probe_audio_duration", lambda _path: 60.0)
 
 
+class _Raw:
+    def __init__(self, body: bytes):
+        self.body, self.reads = body, []
+
+    def read(self, n=-1, decode_content=False):
+        self.reads.append((n, decode_content))
+        return self.body if n < 0 else self.body[:n]
+
+
 class FakeResponse:
-    def __init__(self, status_code: int, text: str = ""):
+    """What transcribe_chunk uses of a streamed requests.Response."""
+
+    def __init__(self, status_code: int, text: str = "", headers=None):
         self.status_code = status_code
         self.text = text
+        self.headers = headers or {}
+        self.raw = _Raw(text.encode("utf-8"))
 
     @property
     def ok(self) -> bool:
-        return 200 <= self.status_code < 300
+        return 200 <= self.status_code < 400
+
+    @property
+    def is_redirect(self) -> bool:
+        return self.status_code in (301, 302, 303, 307, 308) and "Location" in self.headers
 
 
 # --- transcribe_chunk: provider routing -------------------------------- #
@@ -55,10 +72,11 @@ class TestTranscribeChunk:
         fake_config.set("groq_api_key", "gsk_test")
         captured = {}
 
-        def fake_post(url, headers=None, files=None, data=None, timeout=None):
+        def fake_post(url, headers=None, files=None, data=None, timeout=None, **kwargs):
             captured["url"] = url
             captured["headers"] = headers
             captured["model"] = data["model"]
+            captured["kwargs"] = kwargs
             return FakeResponse(200, "hello world")
 
         monkeypatch.setattr(tr.requests, "post", fake_post)
@@ -67,12 +85,36 @@ class TestTranscribeChunk:
         assert captured["url"] == tr.PROVIDERS["groq"]["endpoint"]
         assert captured["model"] == "whisper-large-v3"
         assert captured["headers"]["Authorization"] == "Bearer gsk_test"
+        assert captured["kwargs"] == {"allow_redirects": False, "stream": True}
+
+    def test_redirect_fails_without_a_second_request(self, monkeypatch, fake_config, chunk_file):
+        fake_config.set("groq_api_key", "gsk_test")
+        posts = []
+
+        def fake_post(url, **kwargs):
+            posts.append(url)
+            return FakeResponse(302, "", headers={"Location": "https://collector.example/upload"})
+
+        monkeypatch.setattr(tr.requests, "post", fake_post)
+        monkeypatch.setattr(tr.requests, "get", lambda *a, **k: pytest.fail("followed the redirect"))
+        with pytest.raises(tr.TranscribeError, match="302") as caught:
+            tr.transcribe_chunk(chunk_file, "groq", config=fake_config)
+        assert posts == [tr.PROVIDERS["groq"]["endpoint"]]
+        assert "collector.example" not in str(caught.value)
+
+    def test_oversized_transcript_is_refused(self, monkeypatch, fake_config, chunk_file):
+        fake_config.set("groq_api_key", "gsk_test")
+        resp = FakeResponse(200, "x" * (tr._MAX_TRANSCRIPT_BYTES + 10))
+        monkeypatch.setattr(tr.requests, "post", lambda url, **kwargs: resp)
+        with pytest.raises(tr.TranscribeError, match="size limit"):
+            tr.transcribe_chunk(chunk_file, "groq", config=fake_config)
+        assert resp.raw.reads == [(tr._MAX_TRANSCRIPT_BYTES + 1, True)], "read once, capped, decompressed"
 
     def test_routes_to_openai_endpoint(self, monkeypatch, fake_config, chunk_file):
         fake_config.set("openai_api_key", "sk-test")
         captured = {}
 
-        def fake_post(url, headers=None, files=None, data=None, timeout=None):
+        def fake_post(url, headers=None, files=None, data=None, timeout=None, **kwargs):
             captured["url"] = url
             captured["model"] = data["model"]
             return FakeResponse(200, "openai output")
@@ -111,7 +153,7 @@ class TestFallback:
         fake_config.set("openai_api_key", "sk-test")
         calls: List[str] = []
 
-        def fake_post(url, headers=None, files=None, data=None, timeout=None):
+        def fake_post(url, headers=None, files=None, data=None, timeout=None, **kwargs):
             calls.append(url)
             return FakeResponse(200, "from-groq")
 
@@ -125,7 +167,7 @@ class TestFallback:
         fake_config.set("openai_api_key", "sk-test")
         calls: List[str] = []
 
-        def fake_post(url, headers=None, files=None, data=None, timeout=None):
+        def fake_post(url, headers=None, files=None, data=None, timeout=None, **kwargs):
             calls.append(url)
             if url == tr.PROVIDERS["groq"]["endpoint"]:
                 return FakeResponse(429, "rate limited")
@@ -144,7 +186,7 @@ class TestFallback:
         fake_config.set("openai_api_key", "sk-test")
         calls: List[str] = []
 
-        def fake_post(url, headers=None, files=None, data=None, timeout=None):
+        def fake_post(url, headers=None, files=None, data=None, timeout=None, **kwargs):
             calls.append(url)
             return FakeResponse(200, "via-openai")
 

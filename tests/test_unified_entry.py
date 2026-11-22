@@ -486,7 +486,8 @@ def test_login_opens_site_in_dedicated_browser(capsys, monkeypatch, fake_browser
     monkeypatch.setattr(manage, "is_added", lambda ch, data=None: True)
     code, out = _run(capsys, ["login", "web2"])
     assert code == 0
-    assert fake_browser["opened"] == ["https://example.test/login"]
+    assert fake_browser["opened"] == ["web2"], "only the channel name crosses the socket; the watcher looks up the page"
+    assert out["items"][0]["opened"] == "https://example.test/login"
 
 
 def test_logout_clears_only_that_sites_domains(capsys, monkeypatch):
@@ -496,12 +497,29 @@ def test_logout_clears_only_that_sites_domains(capsys, monkeypatch):
         name = "web2"
         login_url = "https://www.example.test/login"
 
+    from agent_reach.runtime import browser_binding, manage
+
     monkeypatch.setattr(unified, "get_all_channels", lambda: [BrowserChannel()])
-    cleared = []
-    monkeypatch.setattr(browser, "clear_site", lambda domains: cleared.append(list(domains)) or 2)
+    cleared, held = [], {"on": False}
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def exclusive():
+        held["on"] = True
+        yield
+        held["on"] = False
+
+    monkeypatch.setattr(browser_binding, "exclusive_browser", exclusive)
+    monkeypatch.setattr(browser, "clear_site", lambda name: cleared.append((name, held["on"])) or 2)
+    monkeypatch.setattr(manage, "is_added", lambda ch, data=None: True)
     code, out = _run(capsys, ["logout", "web2"])
-    assert code == 0 and out["items"] == [{"removed": True, "cleared_cookies": 2}]
-    assert cleared == [["example.test"]]
+    assert code == 0
+    assert out["items"][0]["removed"] is True and out["items"][0]["cleared_cookies"] == 2
+    assert cleared == [("web2", True)], "the caller holds the browser lock; only the channel name is sent"
+    monkeypatch.setattr(manage, "is_added", lambda ch, data=None: False)
+    code, out = _run(capsys, ["logout", "web2"])
+    assert code == 1 and cleared == [("web2", True)]
 
 
 @pytest.mark.parametrize("argv", [["ask", "find VLA"], ["mcp"], ["cloak", "setup"], ["browser", "repair-opencli"],
@@ -544,3 +562,53 @@ def test_opencli_message_reaches_the_agent_but_upstream_help_is_never_a_hint():
     login = _opencli_error("ok: false\nerror:\n  code: AUTH_REQUIRED\n  message: Not logged into x.com\n"
                            "  help: Log in in your Chrome.\n", "reach login steps")
     assert login.message == "Not logged into x.com" and login.hint == "reach login steps"  # Reach's own browser
+
+
+_PROXY_ENV = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy")
+
+
+def _clear_proxy_env(monkeypatch):
+    import os
+
+    for key in _PROXY_ENV:
+        monkeypatch.setenv(key, "x")  # records the original value so it is restored after the test
+        monkeypatch.delenv(key)
+    return os.environ
+
+
+def test_no_proxy_is_left_alone_when_no_proxy_is_configured(monkeypatch):
+    environ = _clear_proxy_env(monkeypatch)
+    unified._apply_saved_proxy()
+    assert not any(key in environ for key in _PROXY_ENV), "NO_PROXY alone would switch off the OS proxy"
+
+
+def test_loopback_bypasses_an_environment_proxy(monkeypatch):
+    environ = _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+    monkeypatch.setenv("NO_PROXY", "corp.example")
+    unified._apply_saved_proxy()
+    hosts = environ["NO_PROXY"].split(",")
+    assert hosts[0] == "corp.example" and {"localhost", "127.0.0.1", "::1"} <= set(hosts)
+    assert environ["no_proxy"] == environ["NO_PROXY"]
+
+
+def test_a_saved_proxy_is_applied_with_a_loopback_bypass(monkeypatch):
+    from agent_reach.runtime import manage
+
+    environ = _clear_proxy_env(monkeypatch)
+    manage.configure("proxy", "http://127.0.0.1:8899")
+    unified._apply_saved_proxy()
+    assert environ["HTTPS_PROXY"] == environ["HTTP_PROXY"] == "http://127.0.0.1:8899"
+    assert "127.0.0.1" in environ["NO_PROXY"].split(",")
+
+
+def test_a_config_type_error_is_reported_without_its_content(capsys):
+    from agent_reach.utils.paths import home_dir
+
+    path = home_dir() / ".agent-reach" / "config.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("groq_api_key: !!bool gsk_secret_value_123\n")
+    code, out = _run(capsys, ["configure", "openai-key", "sk-new"])
+    assert code == 1 and out["error"]["code"] == "NEED_SETUP"
+    assert "secret" not in json.dumps(out)
+    assert path.read_text() == "groq_api_key: !!bool gsk_secret_value_123\n", "the file is left as it was"

@@ -203,26 +203,34 @@ def test_a_short_or_empty_token_is_replaced(home):
     assert len(path.read_text().strip()) == 64
 
 
-def test_clear_site_asks_the_watcher_for_that_sites_domains_only(home, monkeypatch):
+def test_clear_site_sends_only_the_channel_name(home, monkeypatch):
     from agent_reach.runtime.result import ReachError
     browser.profile_dir().mkdir(parents=True)
     monkeypatch.setattr(browser, "ensure_running", lambda: "dedicated")
     sent = []
     monkeypatch.setattr(cdp, "request", lambda command, timeout=15.0, **args: sent.append((command, args))
                         or {"ok": True, "cleared": 2})
-    assert browser.clear_site(["reddit.com"]) == 2
-    assert sent == [("clear_site", {"domains": ["reddit.com"]})]
+    assert browser.clear_site("reddit") == 2
+    assert sent == [("clear_site", {"channel": "reddit"})]
     monkeypatch.setattr(cdp, "request", lambda *a, **k: {"ok": False, "error": "cleanup could not be verified"})
     with pytest.raises(ReachError, match="retained"):
-        browser.clear_site(["reddit.com"])
+        browser.clear_site("reddit")
     monkeypatch.setattr(cdp, "request", lambda *a, **k: None)
     with pytest.raises(ReachError):
-        browser.clear_site(["reddit.com"])
+        browser.clear_site("reddit")
 
 
 def test_clear_site_never_opens_a_browser_that_was_never_used(home, monkeypatch):
     monkeypatch.setattr(browser, "ensure_running", lambda: pytest.fail("opened the browser"))
-    assert browser.clear_site(["reddit.com"]) == 0
+    assert browser.clear_site("reddit") == 0
+
+
+def test_start_sends_only_the_channel_name(home, monkeypatch):
+    monkeypatch.setattr(browser, "ensure_running", lambda: "dedicated")
+    sent = []
+    monkeypatch.setattr(cdp, "request", lambda command, timeout=15.0, **args: sent.append((command, args)) or {"ok": True})
+    browser.start("twitter")
+    assert sent == [("open", {"channel": "twitter"})]
 
 
 def test_stop_closes_through_the_control_socket(home, monkeypatch):

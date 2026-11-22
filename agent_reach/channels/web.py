@@ -9,7 +9,6 @@ import http.client
 import json
 import re
 import time
-import urllib.request
 
 from agent_reach.runtime.result import (
     BAD_INPUT,
@@ -184,16 +183,12 @@ class WebChannel(Channel):
         """Read a page through Jina Reader and return its Markdown text."""
         url = normalize_public_http_url(url)
         jina_url = f"https://r.jina.ai/{url}"
-        req = urllib.request.Request(
-            jina_url,
-            headers={"User-Agent": _UA, "Accept": "text/plain"},
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read(_MAX_RESPONSE_BYTES + 1)
-        if len(body) > _MAX_RESPONSE_BYTES:
-            raise ValueError(
-                f"Jina Reader response exceeds {_MAX_RESPONSE_BYTES} byte limit"
-            )
+        try:
+            # Same-origin redirects only, with a size cap: the reader may not send us elsewhere.
+            body = http_request(jina_url, timeout=timeout, headers={"User-Agent": _UA, "Accept": "text/plain"},
+                                max_bytes=_MAX_RESPONSE_BYTES)
+        except ReachError as exc:
+            raise ValueError(f"Jina Reader response rejected: {exc.message}") from None
         if _is_antibot_page(body):
             raise RuntimeError(
                 "Jina Reader returned an anti-bot verification page instead of the content; "
