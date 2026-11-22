@@ -14,7 +14,6 @@ import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Dict, List, Optional
-from urllib.parse import urlparse
 
 from agent_reach import __version__
 from agent_reach.utils.paths import home_dir
@@ -27,7 +26,7 @@ CHECK_FRESH_SECONDS = 24 * 3600
 
 #: Machine prerequisites a channel may list in `prereqs` (keys of tools.TOOLS).
 #: `add` installs them when the machine has none, without an admin password.
-PREREQS = ("node", "ffmpeg", "chrome")
+PREREQS = ("ffmpeg",)
 
 
 def _channels():
@@ -51,8 +50,6 @@ def is_added(ch, data: Optional[dict] = None) -> bool:
     return ch.level == "default" and ch.name not in data["removed_defaults"]
 
 
-def _uses_browser(ch) -> bool:
-    return bool(ch.login_url)
 
 
 
@@ -73,19 +70,11 @@ def fingerprint(channel: str) -> str:
     """Invalidate checks when this build, channel dependencies, source, or network changes."""
     from agent_reach.config import Config
 
-    from .browser_binding import profile_for
-
     data = state.load()
     cfg = Config(read_only=True)
     ch = _channel(channel)
-    relevant = set(ch.prereqs) | set(ch.tools) | set(channel_tools(ch))
-    relevant.update(name for action in ch.actions for name, _ in action.backends)
-    session_revision = data.get("session_revisions", {}).get(channel)
-    # A new browser port is a repair for browser channels: drop pauses and checks from the old port.
-    browser_port = cfg.get("browser_port") if "opencli" in relevant else None
-    value = [__version__, code_signature(), channel, profile_for(channel),
-             cfg.get("proxy"), browser_port, session_revision,
-             {k: data["tools"].get(k, {}).get("version") for k in sorted(relevant)}]
+    value = [__version__, code_signature(), channel, cfg.get("proxy"),
+             {k: data["tools"].get(k, {}).get("version") for k in sorted(channel_tools(ch))}]
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -109,33 +98,8 @@ def fresh_check(channel: str, check: Optional[dict]) -> bool:
 
 def channel_tools(ch) -> List[str]:
     """Everything `add` installs for the channel, prerequisites first."""
-    names = (["node", "opencli", "chrome"] if _uses_browser(ch) else []) + list(ch.prereqs) + list(ch.tools)
-    return list(dict.fromkeys(names))
+    return list(dict.fromkeys(ch.prereqs))
 
-
-def site_domains(ch) -> List[str]:
-    """Cookie domains of the channel's site in the Agent Reach browser."""
-    if getattr(ch, "domains", ()):
-        return list(ch.domains)
-    host = (urlparse(ch.login_url).hostname or "").lower()
-    if host.startswith("www."):
-        host = host[4:]
-    return [host] if host else []
-
-
-def _has_login(ch) -> bool:
-    return bool(ch.login_url or ch.login_argv or ch.logout_keys)
-
-
-def browser_login_next(ch) -> str:
-    """The single sentence for the user after the login page opened in the Agent Reach browser."""
-    from agent_reach.channels.base import Channel
-
-    needs_sync = bool(ch.session) or type(ch).sync_login is not Channel.sync_login
-    if needs_sync:
-        return (f"The user logs in to {ch.name} in the Agent Reach browser window that just opened; "
-                f"then run `agent-reach login {ch.name} --sync`.")
-    return f"The user logs in to {ch.name} in the Agent Reach browser window that just opened; then retry the action."
 
 # ── checks ──
 
@@ -175,7 +139,7 @@ def run_checks(names: Optional[List[str]] = None, timeout: float = 60.0, search_
                     "item_count": len(out["items"]), "attempts": out["meta"]["attempts"],
                     "access": out["meta"].get("access"),
                 })
-                if err and err["code"] in {"PLATFORM_BLOCKED", "RATE_LIMITED", "NEED_LOGIN"}:
+                if err and err["code"] in {"PLATFORM_BLOCKED", "RATE_LIMITED"}:
                     break
     by_action: Dict[tuple, bool] = {}
     codes: Dict[tuple, str] = {}
@@ -229,9 +193,6 @@ def channel_status(ch, data: dict) -> dict:
         failed = [a for a, ok in actions.items() if not ok]
         if failed:
             codes = check.get("codes", {})
-            if all(codes.get(a) == "NEED_LOGIN" for a in failed):
-                return {"status": "needs_login", "problems": [f"needs login for: {', '.join(failed)}"],
-                        "hint": f"agent-reach login {ch.name}", "checked_at": check["at"]}
             if all(codes.get(a) == "RATE_LIMITED" for a in failed):
                 return {"status": "cooldown", "problems": [f"rate limited: {', '.join(failed)}"],
                         "checked_at": check["at"]}
@@ -262,13 +223,8 @@ def doctor() -> dict:
 
 # ── add / remove ──
 
-def _install_channel(ch, *, allow_upgrade: bool = False) -> List[dict]:
-    installed = [tools.ensure(t, allow_upgrade=allow_upgrade) for t in channel_tools(ch)]
-    if _uses_browser(ch):
-        from . import browser
-        from .browser_binding import exclusive_browser
-        with exclusive_browser():  # setup may restart the browser; let running queries finish first
-            browser.setup()
+def _install_channel(ch) -> List[dict]:
+    installed = [tools.ensure(t) for t in channel_tools(ch)]
     ch.on_add()
     return installed
 
@@ -279,22 +235,15 @@ def _sentence(text: str) -> str:
 
 
 def _next_step(ch) -> Optional[str]:
-    """Tools are prepared; actual access decides whether login is needed."""
-    if ch.login_url or ch.login_argv:
-        return ("Use existing public tools when they cover the task. "
-                f"If access requires login, run agent-reach login {ch.name} "
-                "to open the shared dedicated browser or native login flow.")
+    """What the user still has to do for this channel, if anything."""
     return " ".join(_sentence(p) for p in ch.setup_problems()) or None
 
 
-def add(name: str, *, allow_upgrade: bool = False) -> dict:
-    """Install whatever the channel needs (prerequisites included), add it, describe existing-session reuse."""
+def add(name: str) -> dict:
+    """Install whatever the channel needs and add it."""
     ch = _channel(name)
-    previously_added = is_added(ch)
-    installed = _install_channel(ch, allow_upgrade=allow_upgrade)
+    installed = _install_channel(ch)
     def save_channel(data):
-        if not previously_added:
-            data.setdefault("session_reuse", {}).pop(name, None)
         data["channels"][name] = {"added_at": state.now()}
         data["removed_defaults"] = [n for n in data["removed_defaults"] if n != name]
     state.mutate(save_channel)
@@ -317,39 +266,20 @@ def _prune(data: dict) -> List[str]:
 
 def remove(name: str) -> dict:
     """Remove a channel (defaults too) and everything only it used."""
-    from . import browser
-    from .sessions import clear_session
-
     ch = _channel(name)
     data = state.load()
-    was_added = is_added(ch, data)
-    if not was_added:
-        return {"channel": name, "removed": False, "removed_tools": [], "cleared_cookies": 0,
-                "browser_deleted": False, "warnings": []}
-    # Keep the registration and its tools until required login cleanup succeeds.
-    cookies = browser.clear_site(site_domains(ch)) if _uses_browser(ch) else 0
+    if not is_added(ch, data):
+        return {"channel": name, "removed": False, "removed_tools": []}
     ch.on_remove()
-    if ch.session:
-        clear_session(ch.session)
-    if ch.logout_keys:
-        from agent_reach.config import Config
-
-        cfg = Config()
-        for key in ch.logout_keys:
-            if cfg.get(key):
-                cfg.delete(key)
     def forget(saved):
         saved["channels"].pop(name, None)
-        saved.setdefault("session_reuse", {})[name] = {"blocked": True, "at": state.now()}
         saved["checks"].pop(name, None)
         if ch.level == "default" and name not in saved["removed_defaults"]:
             saved["removed_defaults"].append(name)
-        for key in ("reuse_sources", "setup_failures", "backend_health", "cooldowns"):
+        for key in ("setup_failures", "backend_health", "cooldowns"):
             saved.get(key, {}).pop(name, None)
-        saved.setdefault("session_revisions", {})[name] = state.now()
     state.mutate(forget)
-    return {"channel": name, "removed": True, "removed_tools": _prune(state.load()),
-            "cleared_cookies": cookies, "browser_deleted": False, "warnings": []}
+    return {"channel": name, "removed": True, "removed_tools": _prune(state.load())}
 
 
 # ── skill (the agent-facing instructions) ──
@@ -414,11 +344,10 @@ def render_skill() -> str:
     from importlib.resources import files
 
     template = files("agent_reach").joinpath("skill").joinpath("SKILL.md").read_text("utf-8")
-    rows = ["| 채널 | 용도(언제 쓰는가) | 동작 | 등급 | 로그인 |", "|---|---|---|---|---|"]
+    rows = ["| 채널 | 용도(언제 쓰는가) | 동작 |", "|---|---|---|"]
     for ch in _channels():
-        login = "필요할 때만" if _has_login(ch) else "-"
         purpose = ch.purpose.replace("|", "/").replace("\n", " ")
-        rows.append(f"| {ch.name} | {purpose} | {', '.join(a.name for a in ch.actions)} | {ch.level} | {login} |")
+        rows.append(f"| {ch.name} | {purpose} | {', '.join(a.name for a in ch.actions)} |")
     return template.replace("{{CHANNEL_TABLE}}", "\n".join(rows)).replace("{{VERSION}}", __version__)
 
 
@@ -665,7 +594,7 @@ def _skill_uninstall_targets() -> List[Path]:
 
 def _optional_entry(c) -> dict:
     """What the user must do for an optional channel; installs happen by themselves."""
-    needs = (["login_if_required"] if (c.login_url or c.login_argv) else []) + ([c.needs_key] if c.needs_key else [])
+    needs = [c.needs_key] if c.needs_key else []
     return {"channel": c.name, "level": c.level, "add": f"agent-reach add {c.name}", "needs": needs}
 
 
@@ -674,7 +603,7 @@ def setup() -> dict:
     if not state.exists():
         state.save(state.load())
     user_actions = _retired_mcp_notice()
-    state.mutate(lambda saved: [saved.pop(key, None) for key in ("reuse_sources", "ask_pending", "pending")])
+    _retire_browser_stack()
     skill = place_skill()
     data = state.load()
     defaults = [c for c in _channels() if c.level == "default" and is_added(c, data)]
@@ -696,8 +625,6 @@ def setup() -> dict:
         "default_channels": added,
         "skill": skill,
         "optional_channels": optional,
-        "logins": [{"channel": c.name, "command": f"agent-reach login {c.name}",
-                    "when": "only_if_required"} for c in defaults if _has_login(c)],
         "capability_summary": capability_summary(registered, current),
     }
     from agent_reach.utils.paths import PrivatePathError, atomic_write_private_text
@@ -712,6 +639,41 @@ def setup() -> dict:
         report["write_error"] = "설치 보고서를 파일로 저장하지 못했습니다. 전체 표는 installation_report.markdown에 그대로 있습니다."
     result["installation_report"] = report
     return result
+
+
+def _retire_browser_stack() -> None:
+    """Earlier versions kept a logged-in browser profile and saved cookies. Delete them.
+
+    Only paths this program recorded as its own are removed (browser/, sessions/,
+    old lock folder); stale state keys that referred to them are dropped.
+    """
+    root = state.root()
+    owned = state.load().get("owned_paths", {})
+    doomed = sorted((n for n in owned if n.split("/", 1)[0] in ("browser", "sessions", "browser-locks", "cloak-binaries")
+                     and ".." not in Path(n).parts and not Path(n).is_absolute()),
+                    key=lambda n: len(Path(n).parts), reverse=True)
+    from agent_reach.utils.paths import PrivatePathError, ensure_no_symlink_path
+
+    for name in doomed:
+        path = root / name
+        try:
+            ensure_no_symlink_path(path.parent, "retired browser data")
+            _remove(path)
+        except (OSError, PrivatePathError):
+            continue
+    for folder in ("browser", "sessions", "browser-locks"):
+        try:
+            (root / folder).rmdir()
+        except OSError:
+            pass
+
+    def forget(saved):
+        for key in ("reuse_sources", "ask_pending", "pending", "session_reuse", "session_revisions",
+                    "session_migrations", "local_browser_source", "request_starts"):
+            saved.pop(key, None)
+        for name in doomed:
+            saved.get("owned_paths", {}).pop(name, None)
+    state.mutate(forget)
 
 
 def _retired_mcp_notice() -> list:
@@ -765,22 +727,6 @@ def install_method() -> str:
 UNINSTALL_PROGRAM = "uv tool uninstall agent-reach"
 
 
-def _ordered_tools(names) -> List[str]:
-    """Tools plus what they need, dependencies first, each once."""
-    out: List[str] = []
-
-    def visit(n: str) -> None:
-        if n in out or n not in tools.TOOLS:
-            return
-        for d in tools.TOOLS[n].needs:
-            visit(d)
-        out.append(n)
-
-    for n in names:
-        visit(n)
-    return out
-
-
 def sync() -> dict:
     """Bring every added channel's tools to their latest allowed version, prune unused
     tools, drop channels this version no longer has, refresh the skill.
@@ -798,7 +744,7 @@ def sync() -> dict:
     actions = [f"The {n} channel is no longer part of Agent Reach and was removed." for n in dropped]
     added = [c for c in _channels() if is_added(c, data)]
     synced, problems, failed = [], [], set()
-    for t in _ordered_tools(t for c in added for t in channel_tools(c)):
+    for t in dict.fromkeys(t for c in added for t in channel_tools(c)):
         try:
             synced.append(tools.ensure(t, upgrade=True))
         except ReachError as err:
@@ -815,11 +761,6 @@ def sync() -> dict:
         except ReachError as err:
             actions.append(_sentence(f"{c.name}: {err.hint or err.message}"))
         actions += [_sentence(f"{c.name}: {p}") for p in c.setup_problems()]
-        check = data["checks"].get(c.name) or {}
-        previous = check.get("previous") or {}
-        expired = [a for a, code in (check.get("codes") or {}).items() if code == "NEED_LOGIN" and previous.get(a)]
-        if expired:
-            actions.append(f"The user needs to log in to {c.name} again: run `agent-reach login {c.name}`.")
     return {"version": __version__, "tools": synced, "problems": problems, "removed_tools": _prune(state.load()),
             "dropped_channels": dropped, "user_actions": actions, "skill": place_skill()}
 
@@ -845,8 +786,6 @@ def update(check_only: bool = False) -> dict:
 
 
 def uninstall(dry_run: bool = False) -> dict:
-    from . import browser
-
     root = state.root()
     targets = _skill_uninstall_targets()  # before state.json goes: it records the links
     data = state.load()
@@ -858,12 +797,7 @@ def uninstall(dry_run: bool = False) -> dict:
                 if entry.get("owner") == tools.OURS and entry.get("scope") == "private"
                 and tools._SAFE_NAME.fullmatch(n)]
     targets = [t for t in targets if t.exists() or t.is_symlink()]
-    globals_ = tools.uninstall_global_owned(dry_run=True)
     if not dry_run:
-        if state.owned_path(browser.browser_root()) or browser._load_state().get("backend"):
-            if not browser.stop():
-                raise ReachError(UPSTREAM_BROKEN, "The dedicated browser could not close; uninstall stopped before deleting its files")
-        tools.uninstall_global_owned(dry_run=False)
         # Children first; directory entries do not authorize deleting unrecorded siblings.
         for t in sorted(set(targets), key=lambda p: len(p.parts), reverse=True):
             from agent_reach.utils.paths import ensure_no_symlink_path
@@ -882,15 +816,13 @@ def uninstall(dry_run: bool = False) -> dict:
                 pass
     removing = {str(t) for t in targets} | {str(root / "tools")}
     kept = sorted(str(p) for p in root.iterdir() if str(p) not in removing) if root.exists() else []
-    return {"dry_run": dry_run, "removed": [str(t) for t in targets], "global_tools_removed": globals_,
+    return {"dry_run": dry_run, "removed": [str(t) for t in targets],
             "kept_unrecognized": kept, "remove_program": UNINSTALL_PROGRAM}
 
 
 # ── configure ──
 
-CONFIG_KEYS = {"groq-key": "groq_api_key", "openai-key": "openai_api_key", "proxy": "proxy", "github-token": "github_token",
-               "browser-port": "browser_port",
-}
+CONFIG_KEYS = {"groq-key": "groq_api_key", "openai-key": "openai_api_key", "proxy": "proxy", "github-token": "github_token"}
 
 
 def configure(key: str, value: str) -> dict:
@@ -900,12 +832,5 @@ def configure(key: str, value: str) -> dict:
         raise ReachError(BAD_INPUT, f"unknown key: {key}; valid: {', '.join(CONFIG_KEYS)}")
     if not value:
         raise ReachError(BAD_INPUT, "empty value")
-    if key == "browser-port":
-        if not (value.isascii() and value.isdigit()) or not 1024 <= int(value) <= 65535:
-            raise ReachError(BAD_INPUT, "browser-port must be a number from 1024 to 65535")
-        from . import browser
-
-        if browser.watcher_running():  # our browser on the old port; it reopens on the new one when next used
-            browser.stop()
-    Config().set(CONFIG_KEYS[key], int(value) if key == "browser-port" else value)
+    Config().set(CONFIG_KEYS[key], value)
     return {"key": key, "saved": True}

@@ -1,17 +1,11 @@
 """Install receipt and capability summary. No I/O: management passes in the status records."""
 from datetime import datetime
 
-# What is declared as needing the user's own login before it can work.
-_LOGIN_NOTE = {
-    'reddit': '서브레딧 최신 글, 사이트 내부 검색',
-    'twitter': '트윗 검색, 타임라인, 답글 스레드',
-}
-
 _CAPABILITY_LIMITS = {
     'youtube': ['read는 메타 정보와 설명만 반환합니다. 독립된 comments 동작은 없습니다.',
                 '자막은 영상에 자막 트랙이 있어야 하며, 전사는 별도로 API 키와 사용량이 필요합니다.'],
-    'reddit': ['read는 실제로 반환된 글과 댓글만 보장합니다. 전체 댓글 트리를 보장하지 않으며 글쓰기 동작은 없습니다.'],
-    'twitter': ['thread는 실제로 반환된 답글만 포함합니다. 전체 답글을 보장하지 않으며 게시 동작은 없습니다.'],
+    'reddit': ['로그인 없이 공개 웹 검색과 페이지 읽기로만 접근합니다. Reddit이 요청을 차단하면 본문과 댓글을 읽지 못할 수 있습니다.'],
+    'twitter': ['로그인 없이 트윗 하나를 읽는 동작만 제공합니다. 검색, 타임라인, 답글 스레드는 제공하지 않습니다.'],
     'github-trending': ['공식 API가 없어서 트렌딩 페이지의 HTML을 해석합니다. 페이지 구조가 바뀌면 일시적으로 실패할 수 있습니다.'],
     'dribbble': ['공개 API가 없어서 웹 검색과 페이지 읽기로만 접근합니다. 이미지 자체는 반환하지 않습니다.'],
     'producthunt': ['공개 피드에 실린 최신 제품만 제공합니다. 득표 수와 검색은 제공하지 않습니다.'],
@@ -30,7 +24,7 @@ _DISPLAY_NAMES = {
 _STATUS_LABELS = {
     'not_added': '미연결(필요할 때 추가)', 'needs_setup': '설정 필요', 'unverified': '연결됨(실측 전)',
     'ready': '실측 통과', 'search_ready': '검색만 실측 통과',
-    'needs_login': '로그인 필요', 'cooldown': '일시 중지(요청 제한)',
+    'cooldown': '일시 중지(요청 제한)',
     'needs_user_action': '사용자 인증 대기', 'broken': '현재 경로 장애',
 }
 
@@ -58,7 +52,8 @@ def installation_report(result):
         _local_greeting(), '',
         f"**Agent Reach {result['version']} {'설치가 완료되었습니다' if completed else '설치가 아직 끝나지 않았습니다'}.** "
         f'기본 채널 {len(installs)}개 중 {installed}개가 준비되었습니다.', '',
-        '| 플랫폼 | 용도 | 로그인이 필요한 기능 |', '|---|---|---|',
+        '모든 채널은 로그인 없이 공개 데이터만 읽습니다.', '',
+        '| 플랫폼 | 용도 |', '|---|---|',
     ]
     for entry in sorted(entries, key=lambda item: item['level'] != 'default'):
         name = entry['channel']
@@ -69,10 +64,9 @@ def installation_report(result):
                 label += ' (설치 실패: ' + item.get('error', {}).get('code', 'UNKNOWN') + ')'
             elif not item:
                 label += ' (사용자가 제거함)'
-        elif entry['reach_status'] in {'needs_setup', 'needs_login', 'cooldown', 'needs_user_action', 'broken'}:
+        elif entry['reach_status'] in {'needs_setup', 'cooldown', 'needs_user_action', 'broken'}:
             label += ' (' + _STATUS_LABELS[entry['reach_status']] + ')'
-        lines.append('| ' + ' | '.join(cell(value) for value in (
-            label, entry['purpose'], _LOGIN_NOTE.get(name, '—'))) + ' |')
+        lines.append('| ' + ' | '.join(cell(value) for value in (label, entry['purpose'])) + ' |')
     verified = [entry for entry in entries if entry['verified_actions']]
     if verified:
         names = '; '.join(_DISPLAY_NAMES.get(entry['channel'], entry['channel']) + ': ' +
@@ -80,7 +74,7 @@ def installation_report(result):
         lines += ['', '실측 통과: ' + names + '. 나머지는 아직 항목별로 실측하지 않았습니다.']
     else:
         lines += ['', '아직 항목별 실측은 하지 않았습니다.']
-    lines += ['', '**찾고 싶은 것을 바로 말씀해 주십시오.** 로그인이 꼭 필요한 경우에만 전용 브라우저 창을 엽니다.']
+    lines += ['', '**찾고 싶은 것을 바로 말씀해 주십시오.**']
     return '\n'.join(lines) + '\n'
 
 
@@ -94,9 +88,6 @@ def capability_summary(channels, statuses):
     entries = []
     for ch in channels:
         current = by_name.get(ch.name, {})
-        names = [action.name for action in ch.actions]
-        can_login = bool(ch.login_url or ch.login_argv)
-        auth_actions = names if can_login else []
         entries.append({
             'channel': ch.name,
             'level': ch.level,
@@ -104,23 +95,17 @@ def capability_summary(channels, statuses):
             'verified_actions': current.get('verified_actions', []),
             'actions': [{'action': action.name, 'detail': action.help} for action in ch.actions],
             'purpose': ch.purpose,
-            'public_access': '로그인 없이 사용합니다.' if not can_login else '공개 웹 경로를 먼저 시도하고, 남은 작업에 꼭 필요할 때만 로그인을 요청합니다.',
-            'authentication': {
-                'when': 'only_if_required',
-                'may_enable_actions': [name for name in auth_actions if name in names],
-                'note': '선택한 경로가 실제로 인증을 요구할 때에만 사용자에게 전용 브라우저에서 직접 로그인하도록 요청합니다. 로그인 후에도 동작을 다시 검증해야 합니다.',
-            },
             'limits': _CAPABILITY_LIMITS.get(ch.name, []),
         })
-    message = ['에이전트가 이미 가진 공개 검색·읽기 도구를 먼저 사용하고, Reach는 부족한 부분만 보완합니다. 설치할 때 플랫폼별 로그인은 요구하지 않습니다.']
+    message = ['모든 채널은 로그인 없이 공개 데이터만 읽습니다. 채널의 용도(purpose)를 보고 질문에 맞는 채널을 고릅니다.']
     for entry in entries:
         actions = '/'.join(action['action'] for action in entry['actions'])
         status_label = _STATUS_LABELS.get(entry['reach_status'], entry['reach_status'])
         limits = ' '.join(entry['limits'])
         message.append(f"{entry['channel']}: {entry['purpose']} 동작 {actions} ({status_label}). {limits}".rstrip())
     return {
-        'policy': 'public_first; login_only_for_remaining_task_when_required',
-        'evidence_note': '용도 설명은 선언된 기능이며, 이 컴퓨터에서 실측한 결과를 대신하지 않습니다. 네트워크 오류, 403, 시간 초과, 캡차만으로는 로그인이 필요하다고 단정할 수 없습니다.',
+        'policy': 'public_only; no_login',
+        'evidence_note': '용도 설명은 선언된 기능이며, 이 컴퓨터에서 실측한 결과를 대신하지 않습니다.',
         'channels': entries,
         'message': '\n'.join(message),
     }

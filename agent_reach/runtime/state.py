@@ -4,7 +4,7 @@
       "version": 1,
       "channels": {"reddit": {"added_at": "..."}},
       "removed_defaults": ["youtube"],
-      "tools": {"opencli": {"owner": "agent-reach" | "user", "scope": "private" | "global", "version": "2.0.3"}},
+      "tools": {"ffmpeg": {"owner": "agent-reach", "scope": "private", "version": "0.8.1"}},
       "checks": {"reddit": {"at": "...", "actions": {"search": true}, "previous": {"search": true}}},
       "skill": {"links": [{"agent": "claude-code", "path": "...", "kind": "link" | "copy"}], "unlinked": ["/home/u/.cursor/skills"]}
     }
@@ -70,14 +70,14 @@ def save(data: dict) -> None:
     data.setdefault("owned_paths", {})["state.json"] = "state ledger"
     import hashlib
     name = hashlib.sha256(b"reach-state-write").hexdigest() + ".lock"
-    data["owned_paths"]["browser-locks/" + name] = "state lock"
+    data["owned_paths"]["locks/" + name] = "state lock"
     make_private_dir(root())
     atomic_write_private_text(state_path(), json.dumps(data, indent=2, ensure_ascii=False))
 
 
 def mutate(change: Callable[[dict], T]) -> T:
     """Serialize short state read-modify-write operations across CLI processes."""
-    from .browser_binding import execution_lock
+    from .locks import execution_lock
     from .result import ReachError
 
     for _ in range(100):

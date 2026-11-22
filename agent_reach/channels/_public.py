@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 from agent_reach.runtime.result import (
     BAD_INPUT,
     NOT_FOUND,
+    RATE_LIMITED,
     UPSTREAM_BROKEN,
     ReachError,
     make_item,
@@ -355,17 +356,35 @@ def site_search(domains: tuple, query: str, limit: int, timeout: float) -> list:
     from .web import WebChannel
 
     scope = " OR ".join("site:" + d for d in domains)
-    found = WebChannel()._exa_search(query=f"({query}) ({scope})", limit=min(limit * 2, 20), timeout=timeout)
+    try:
+        found = WebChannel()._exa_search(query=f"({query}) ({scope})", limit=min(limit * 2, 20), timeout=timeout)
+    except ReachError as exc:
+        if exc.code != RATE_LIMITED:
+            raise
+        # The search provider's limit must not cool this whole channel down for an hour.
+        raise ReachError(UPSTREAM_BROKEN, "the web search provider is rate limited; try again later") from None
     items = [i for i in found if host_matches(str(i.get("url") or ""), *domains)][:limit]
     if not items:
         raise ReachError(NOT_FOUND, "no results on this site")
     return items
 
 
+_BLOCK_MARKS = ("blocked by network security", "just a moment...", "verify you are human",
+                "enable javascript and cookies to continue", "access denied")
+
+
 class WebReadMixin(Channel):
     """`read` for a site with no public API: its own pages only, through the Web channel readers."""
 
     READ_BACKENDS = (("jina", "_jina_read"), ("exa", "_exa_read"))
+
+    @staticmethod
+    def _usable(items: list) -> list:
+        """A block or challenge page is a failure, so the next reader gets its turn."""
+        head = str((items[0].get("text") if items else "") or "")[:400].casefold()
+        if not head.strip() or any(mark in head for mark in _BLOCK_MARKS):
+            raise ReachError(UPSTREAM_BROKEN, "the site returned a block or verification page instead of the content")
+        return items
 
     def _own_url(self, target: str) -> str:
         url = str(target).strip()
@@ -377,9 +396,9 @@ class WebReadMixin(Channel):
     def _jina_read(self, *, target: str, timeout: float) -> list:
         from .web import WebChannel
 
-        return WebChannel()._jina_read(target=self._own_url(target), timeout=timeout)
+        return self._usable(WebChannel()._jina_read(target=self._own_url(target), timeout=timeout))
 
     def _exa_read(self, *, target: str, timeout: float) -> list:
         from .web import WebChannel
 
-        return WebChannel()._exa_read(target=self._own_url(target), timeout=timeout)
+        return self._usable(WebChannel()._exa_read(target=self._own_url(target), timeout=timeout))

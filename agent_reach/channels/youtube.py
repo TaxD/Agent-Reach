@@ -80,7 +80,7 @@ def _run_ytdlp(args: list, timeout: float, cwd=None) -> str:
             raise ReachError(
                 PLATFORM_BLOCKED,
                 exc.message,
-                hint="YouTube returned a verification challenge. Stop this request; this does not establish that the public video requires login.",
+                hint="YouTube returned a verification challenge. Stop this request; do not retry or try to get around it.",
             ) from None
         if "429" in err or "too many requests" in err:
             raise ReachError(RATE_LIMITED, exc.message) from None
@@ -247,7 +247,7 @@ class YouTubeChannel(Channel):
         except NoProviderConfigured:
             raise ReachError(
                 "NEED_SETUP", "no Whisper API key configured",
-                hint="Ask the user for a free key from https://console.groq.com, then run `agent-reach configure groq-key`.",
+                hint="Transcription needs a Groq or OpenAI key. The user runs `agent-reach configure groq-key` in their own terminal (hidden input). Never ask them to paste a key into the chat.",
             ) from None
         except TranscribeError as exc:
             raise ReachError("UPSTREAM_BROKEN", str(exc)[:300]) from None

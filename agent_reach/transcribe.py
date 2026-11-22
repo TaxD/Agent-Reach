@@ -388,10 +388,11 @@ def transcribe_chunk(
                 timeout=timeout,
             )
         except requests.RequestException as e:
-            raise TranscribeError(f"{provider}: network error: {e}") from e
+            raise TranscribeError(f"{provider}: network error ({type(e).__name__})") from None
 
     if not resp.ok:
-        raise TranscribeError(f"{provider}: HTTP {resp.status_code}: {resp.text[:300]}")
+        # The provider's error body can echo request details; report the status only.
+        raise TranscribeError(f"{provider}: HTTP {resp.status_code}")
     return resp.text
 
 

@@ -1,4 +1,4 @@
-"""An action's --timeout budget that setup waits (browser cold start) can pause."""
+"""An action's --timeout budget; a backend may pause it while it waits for setup."""
 
 from __future__ import annotations
 
