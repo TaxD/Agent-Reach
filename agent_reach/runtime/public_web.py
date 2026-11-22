@@ -52,6 +52,7 @@ def attempt(channel: Channel, action: Action, params: dict, *, timeout: float) -
 
     from .dispatch import run_action
 
+    in_scope = lambda url: _in_scope(url, action.public_web)  # noqa: E731
     if action.name in {"search", "jobs"}:
         query = " ".join(str(params[k]) for k in ("query", "location", "city") if params.get(k))
         scope = " OR ".join("site:" + url for url in action.public_web)
@@ -60,13 +61,20 @@ def attempt(channel: Channel, action: Action, params: dict, *, timeout: float) -
     elif action.name == "read" and _in_scope(str(params.get("target", "")), action.public_web):
         web_action = "read"
         web_params = {"target": params["target"]}
+    elif action.name == "subreddit" and re.fullmatch(r"(?:r/)?\w{2,21}", str(params.get("name", "")), re.A):
+        # Reddit refuses its listing endpoints on some networks even when logged in.
+        name = str(params["name"]).removeprefix("r/")
+        prefix = f"/r/{name}/".casefold()
+        web_action = "search"
+        web_params = {"query": f"r/{name} (site:reddit.com/r/{name})", "limit": params.get("limit", 5)}
+        in_scope = lambda url: _in_scope(url, action.public_web) and urlsplit(url).path.casefold().startswith(prefix)  # noqa: E731
     else:
         return None
 
     out = run_action(WebChannel(), web_action, web_params, timeout=timeout)
     out["channel"], out["action"] = channel.name, action.name
     if out["ok"]:
-        items = [item for item in out["items"] if _in_scope(str(item.get("url") or ""), action.public_web)]
+        items = [item for item in out["items"] if in_scope(str(item.get("url") or ""))]
         if web_action == "read":
             items = [item for item in items if _readable(item)]
         if not items:

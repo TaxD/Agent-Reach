@@ -61,13 +61,14 @@ class RedditChannel(Channel):
         ),
         Action(
             "subreddit",
-            "서브레딧의 최신 글",
+            "서브레딧의 글. Reddit이 목록 요청을 차단하면 공개 웹 검색 결과로 대체(정렬·최신성 보장 안 됨)",
             (
                 Param("name", "r/ 를 뺀 서브레딧 이름 (예: python)"),
                 Param("limit", "최대 글 수", required=False, type=int, default=5),
             ),
             (("opencli", "_opencli_subreddit"),),
             live_test={"name": "python", "limit": 2},
+            public_web=("reddit.com/r/",),
         ),
     )
 

@@ -166,7 +166,8 @@ def test_new_policy_leaves_comments_subtitles_and_user_search_semantics_unchange
     from agent_reach.channels import get_all_channels
     for ch in get_all_channels():
         for action in ch.actions:
-            if action.name not in {"search", "read"}:
+            # reddit subreddit: Reddit refuses its listing endpoints on some networks even when logged in.
+            if action.name not in {"search", "read"} and (ch.name, action.name) != ("reddit", "subreddit"):
                 assert not action.public_web, (ch.name, action.name)
 
 
