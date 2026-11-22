@@ -43,15 +43,15 @@ class Web(_Base):
 
 
 class Vid(_Base):
-    name, level, actions, tools = "vid", "default", _actions(), ("bili-cli",)
+    name, level, actions, tools = "vid", "default", _actions(), ("demo-cli",)
 
 
-class Bili(_Base):
-    name, level, actions, tools = "bili", "optional", _actions(), ("bili-cli",)
+class Demo(_Base):
+    name, level, actions, tools = "demo", "optional", _actions(), ("demo-cli",)
 
 
-class Bili2(_Base):
-    name, level, actions, tools = "bili2", "optional", _actions(), ("bili-cli",)
+class Demo2(_Base):
+    name, level, actions, tools = "demo2", "optional", _actions(), ("demo-cli",)
 
 
 class Needy(_Base):
@@ -92,8 +92,10 @@ def env(monkeypatch):
     # A private npm fixture exercises dependency installation without shipping MCP.
     monkeypatch.setitem(tools.TOOLS, "mcporter", tools.Tool("mcporter", "npm", "mcporter", ("mcporter",), needs=("node",)))
     monkeypatch.setitem(tools._BY_COMMAND, "mcporter", tools.TOOLS["mcporter"])
+    monkeypatch.setitem(tools.TOOLS, "demo-cli", tools.Tool("demo-cli", "pip", "demo-package", ("demo",), tested="0.6.2"))
+    monkeypatch.setitem(tools._BY_COMMAND, "demo", tools.TOOLS["demo-cli"])
     monkeypatch.setenv("PATH", os.environ.get("PATH", ""))  # cli.main extends PATH; restore it
-    chans = [Web(), Vid(), Bili(), Bili2(), Needy(), Site(), Site2(), Linky()]
+    chans = [Web(), Vid(), Demo(), Demo2(), Needy(), Site(), Site2(), Linky()]
     monkeypatch.setattr(manage, "_channels", lambda: chans)
     system = {}  # command -> path the "user's PATH" has
     monkeypatch.setattr(tools.shutil, "which", lambda c, *a, **k: system.get(c))
@@ -148,36 +150,35 @@ def _user_copy(env, command, version):
 
 
 def test_private_copy_wins_over_path(env):
-    env["system"]["bili"] = "/usr/bin/bili"
-    assert tools.resolve("bili") == "/usr/bin/bili"
-    tools.ensure("bili-cli")
-    assert tools.resolve("bili") == str(tools._private_bin(tools.TOOLS["bili-cli"], "bili"))
+    env["system"]["demo"] = "/usr/bin/demo"
+    assert tools.resolve("demo") == "/usr/bin/demo"
+    tools.ensure("demo-cli")
+    assert tools.resolve("demo") == str(tools._private_bin(tools.TOOLS["demo-cli"], "demo"))
 
 
 def test_install_records_the_installed_version_and_upgrade_reinstalls(env):
-    assert tools.ensure("bili-cli") == {"tool": "bili-cli", "owner": "agent-reach", "scope": "private",
+    assert tools.ensure("demo-cli") == {"tool": "demo-cli", "owner": "agent-reach", "scope": "private",
                                          "version": "1.2.3"}
-    tools.ensure("bili-cli")
-    assert env["installs"] == ["bili-cli"], "an installed tool is not reinstalled by add"
-    env["versions"]["bili-cli"] = "2.0.0"
-    tools.ensure("bili-cli", upgrade=True)
-    assert env["installs"] == ["bili-cli", "bili-cli"]
-    assert state.load()["tools"]["bili-cli"]["version"] == "2.0.0"
+    tools.ensure("demo-cli")
+    assert env["installs"] == ["demo-cli"], "an installed tool is not reinstalled by add"
+    env["versions"]["demo-cli"] = "2.0.0"
+    tools.ensure("demo-cli", upgrade=True)
+    assert env["installs"] == ["demo-cli", "demo-cli"]
+    assert state.load()["tools"]["demo-cli"]["version"] == "2.0.0"
 
 
 def test_old_record_without_version_gets_one_without_reinstall(env):
-    tools.ensure("bili-cli")
+    tools.ensure("demo-cli")
     data = state.load()
-    data["tools"]["bili-cli"] = {"spec": "bilibili-cli==0.6.2", "owner": "agent-reach", "scope": "private"}
+    data["tools"]["demo-cli"] = {"spec": "demo-package==0.6.2", "owner": "agent-reach", "scope": "private"}
     state.save(data)
-    assert tools.ensure("bili-cli")["version"] == "1.2.3"
-    assert env["installs"] == ["bili-cli"]
+    assert tools.ensure("demo-cli")["version"] == "1.2.3"
+    assert env["installs"] == ["demo-cli"]
 
 
 def test_install_spec_uses_tested_versions_or_floor_and_exclude():
-    assert tools.install_spec(tools.TOOLS["bili-cli"]) == "bilibili-cli==0.6.2"
-    spec = tools.install_spec(tools.TOOLS["boss-agent-cli"])
-    assert "git+" not in spec and spec.endswith("/4c991b77086a203173bf08a4cb64a23af6514fe6.zip")
+    assert tools.install_spec(tools.Tool("d", "pip", "demo-package", ("d",), tested="0.6.2")) == "demo-package==0.6.2"
+    assert tools.install_spec(tools.TOOLS["opencli"]) == "@jackwener/opencli@2.0.3"
     assert tools.install_spec(tools.Tool("y", "pip", "pkg", ("y",), floor="1.0", exclude=("1.5",))) == "pkg>=1.0,!=1.5"
     npm = tools.Tool("x", "npm", "pkg", ("x",), floor="1.0.0", exclude=("1.2.0", "1.1.0"))
     assert tools.install_spec(npm) == "pkg@>=1.0.0 <1.1.0 || >1.1.0 <1.2.0 || >1.2.0"
@@ -267,23 +268,23 @@ def test_browser_channel_add_never_opens_login_and_explicit_dedicated_remove_cle
 
 def test_remove_keeps_tool_still_used_by_another_channel(env):
     manage.remove("vid")
-    manage.add("bili")
-    manage.add("bili2")
-    assert manage.remove("bili")["removed_tools"] == []
-    assert tools.resolve("bili") is not None
-    assert manage.remove("bili2")["removed_tools"] == ["bili-cli"]
-    assert not tools.tool_dir("bili-cli").exists()
+    manage.add("demo")
+    manage.add("demo2")
+    assert manage.remove("demo")["removed_tools"] == []
+    assert tools.resolve("demo") is not None
+    assert manage.remove("demo2")["removed_tools"] == ["demo-cli"]
+    assert not tools.tool_dir("demo-cli").exists()
 
 
 def test_default_channel_can_be_removed_and_stays_removed(env):
     manage.setup()
-    assert tools.tool_dir("bili-cli").exists()
+    assert tools.tool_dir("demo-cli").exists()
     out = manage.remove("vid")
-    assert out["removed"] is True and out["removed_tools"] == ["bili-cli"]
+    assert out["removed"] is True and out["removed_tools"] == ["demo-cli"]
     assert state.load()["removed_defaults"] == ["vid"]
     manage.setup()
     manage.sync()
-    assert not tools.tool_dir("bili-cli").exists() and _status("vid") == "not_added"
+    assert not tools.tool_dir("demo-cli").exists() and _status("vid") == "not_added"
     manage.add("vid")
     assert state.load()["removed_defaults"] == [] and _status("vid") == "unverified"
 
@@ -292,30 +293,30 @@ def test_default_channel_can_be_removed_and_stays_removed(env):
 
 
 def test_sync_upgrades_prunes_drops_and_reports(env):
-    manage.add("bili")
+    manage.add("demo")
     data = state.load()
     data["tools"]["old-tool"] = {"owner": "agent-reach", "scope": "private", "version": "0.1.0"}
     data["tools"]["user-thing"] = {"owner": "user", "scope": "global", "version": "1.0.0"}
-    data["channels"]["xiaoyuzhou"] = {"added_at": "2026-01-01T00:00:00Z"}
-    data["checks"]["bili"] = {"at": state.now(), "actions": {"search": False}, "codes": {"search": "NEED_LOGIN"},
+    data["channels"]["retired"] = {"added_at": "2026-01-01T00:00:00Z"}
+    data["checks"]["demo"] = {"at": state.now(), "actions": {"search": False}, "codes": {"search": "NEED_LOGIN"},
                               "previous": {"search": True}}
     state.save(data)
     (tools.tool_dir("old-tool") / "bin").mkdir(parents=True)
-    env["versions"]["bili-cli"] = "2.0.0"
+    env["versions"]["demo-cli"] = "2.0.0"
     out = manage.sync()
     assert out["removed_tools"] == ["old-tool"] and not tools.tool_dir("old-tool").exists()
-    assert set(state.load()["tools"]) == {"bili-cli"}, "records of unused user copies are dropped, the copies kept"
-    assert state.load()["tools"]["bili-cli"]["version"] == "2.0.0"
-    assert env["installs"].count("bili-cli") == 2, "shared tools upgrade once per sync"
-    assert out["dropped_channels"] == ["xiaoyuzhou"] and "xiaoyuzhou" not in state.load()["channels"]
-    assert any("xiaoyuzhou" in a for a in out["user_actions"])
-    assert any("log in to bili" in a for a in out["user_actions"]), "a login that worked before and now fails"
+    assert set(state.load()["tools"]) == {"demo-cli"}, "records of unused user copies are dropped, the copies kept"
+    assert state.load()["tools"]["demo-cli"]["version"] == "2.0.0"
+    assert env["installs"].count("demo-cli") == 2, "shared tools upgrade once per sync"
+    assert out["dropped_channels"] == ["retired"] and "retired" not in state.load()["channels"]
+    assert any("retired" in a for a in out["user_actions"])
+    assert any("log in to demo" in a for a in out["user_actions"]), "a login that worked before and now fails"
 
 
 def test_sync_does_not_ask_to_log_in_again_when_never_logged_in(env):
-    manage.add("bili")
+    manage.add("demo")
     data = state.load()
-    data["checks"]["bili"] = {"at": state.now(), "actions": {"search": False}, "codes": {"search": "NEED_LOGIN"},
+    data["checks"]["demo"] = {"at": state.now(), "actions": {"search": False}, "codes": {"search": "NEED_LOGIN"},
                               "previous": {}}
     state.save(data)
     assert not any("log in" in a for a in manage.sync()["user_actions"])
@@ -336,102 +337,35 @@ def test_upgrade_reinstalls_the_release_with_uv():
     assert cmd[:4] == ["uv", "tool", "install", "--force"] and cmd[-1].endswith("/v2.0.1.zip")
 
 
-def test_update_from_a_non_uv_install_moves_itself_to_uv(env, monkeypatch, tmp_path):
+def test_update_from_a_non_uv_install_never_downloads_or_replaces_itself(env, monkeypatch):
     monkeypatch.setattr(manage, "update_check", lambda: {"current": "2.0.0", "latest": "2.0.1",
                                                          "update_available": True})
     monkeypatch.setattr(manage, "install_method", lambda: "other")
-    monkeypatch.setattr(manage.tools, "resolve", lambda c: "/fake/uv" if c == "uv" else None)
-    calls = []
-
-    class Done:
-        def __init__(self, stdout=""):
-            self.returncode, self.stdout, self.stderr = 0, stdout, ""
-
-    exe = tmp_path / ("agent-reach.exe" if os.name == "nt" else "agent-reach")
-
-    def run(cmd, **kw):
-        calls.append(cmd)
-        if cmd[1:4] == ["tool", "dir", "--bin"]:
-            return Done(str(tmp_path))
-        if cmd[0] == str(exe):
-            return Done(json.dumps({"ok": True, "result": {"user_actions": ["log in to x"],
-                                                           "installation_report": {"markdown": "r"}}}))
-        return Done()
-
-    monkeypatch.setattr(manage.subprocess, "run", run)
+    monkeypatch.setattr(manage.subprocess, "run", lambda *a, **k: pytest.fail("ran an installer"))
     out = manage.update()
-    assert calls[0][:4] == ["/fake/uv", "tool", "install", "--force"] and calls[0][-1].endswith("/v2.0.1.zip")
-    assert calls[2] == [str(exe), "setup"]  # no state yet: the new copy sets itself up
-    assert out["upgraded"] and out["installation_report"] == {"markdown": "r"}
-    assert "log in to x" in out["user_actions"]
+    assert out["upgraded"] is False and out["method"] == "other"
+    assert not hasattr(manage, "_move_to_uv") and "uv" not in tools.TOOLS
 
 
-def test_migration_suggests_channels_from_the_old_config(env):
-    (state.root()).mkdir(parents=True, exist_ok=True)
-    (state.root() / "config.yaml").write_text("twitter_auth_token: t\nxueqiu_cookie: c\n")
-    result = manage.migrate()
-    assert result["suggested_channels"] == ["twitter", "xueqiu"]
-    assert result["retired_channels"] == ["rss", "exa_search"]
-    assert state.load()["migration"] == result
+def test_update_check_treats_a_fork_without_releases_as_current(monkeypatch):
+    import urllib.error
 
+    def no_release(timeout=10):
+        raise urllib.error.HTTPError("https://api.github.com/x", 404, "Not Found", {}, None)
 
-def test_upgrade_report_explains_the_move_from_1_5():
-    from agent_reach.runtime import onboarding
-    assert onboarding._upgrade_lines({"migration": None}) == []
-    text = "\n".join(onboarding._upgrade_lines({
-        "migration": {"suggested_channels": ["twitter"]},
-        "old_copies": {"removed": [], "failed": [{"kind": "pipx", "path": "/x"}]}}))
-    assert "1.5" in text and "X / Twitter" in text and "pipx uninstall agent-reach" in text
-
-
-def _old_venv(root):
-    site = root / ("Lib/site-packages" if os.name == "nt" else "lib/python3.12/site-packages")
-    (site / "agent_reach").mkdir(parents=True)
-    return root
-
-
-def test_old_pipx_copy_and_its_launcher_are_removed(monkeypatch, tmp_path):
-    from agent_reach.runtime import legacy
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("PIPX_HOME", raising=False)
-    monkeypatch.delenv("PIPX_BIN_DIR", raising=False)
-    monkeypatch.setattr(legacy, "_pipx_reported_venvs", lambda: "")
-    venv = _old_venv(tmp_path / ".local" / "pipx" / "venvs" / "agent-reach")
-    (venv / "bin").mkdir()
-    (venv / "bin" / "agent-reach").write_text("")
-    shim = tmp_path / ".local" / "bin" / "agent-reach"
-    shim.parent.mkdir(parents=True)
-    if os.name != "nt":  # pipx links its launcher on macOS/Linux; on Windows uv overwrites the copy
-        shim.symlink_to(venv / "bin" / "agent-reach")
-    (tmp_path / ".agent-reach-venv").mkdir()  # a venv without Agent Reach is not ours to touch
-    assert [i["kind"] for i in legacy.find()] == ["pipx"]
-    out = legacy.remove()
-    assert len(out["removed"]) == 1 and not venv.exists() and not shim.is_symlink()
-    assert (tmp_path / ".agent-reach-venv").is_dir()
-
-
-def test_old_shared_venv_only_loses_agent_reach(monkeypatch, tmp_path):
-    from agent_reach.runtime import legacy
-    monkeypatch.setattr(legacy, "_pipx_reported_venvs", lambda: "")
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.delenv("PIPX_HOME", raising=False)
-    venv = _old_venv(tmp_path / ".agent-reach-venv")
-    ran = []
-    monkeypatch.setattr(legacy.subprocess, "run",
-                        lambda cmd, **k: ran.append(cmd) or type("P", (), {"returncode": 0})())
-    out = legacy.remove()
-    assert len(out["removed"]) == 1 and venv.is_dir()  # the venv stays; only the package is uninstalled
-    assert ran[0][-4:] == ["uninstall", "-y", "-q", "agent-reach"]
+    monkeypatch.setattr(update_notice, "fetch_latest", no_release)
+    out = manage.update_check()
+    assert out["update_available"] is False and out["latest"] == out["current"]
 
 
 def test_update_without_new_release_still_upgrades_tools(env, monkeypatch):
     monkeypatch.setattr(manage, "update_check", lambda: {"current": "2.0.0", "latest": "2.0.0",
                                                          "update_available": False})
-    manage.add("bili")
-    env["versions"]["bili-cli"] = "3.0.0"
+    manage.add("demo")
+    env["versions"]["demo-cli"] = "3.0.0"
     out = manage.update()
     assert out["upgraded"] is False and isinstance(out["user_actions"], list)
-    assert state.load()["tools"]["bili-cli"]["version"] == "3.0.0"
+    assert state.load()["tools"]["demo-cli"]["version"] == "3.0.0"
 
 
 # ── update notice ──
@@ -481,52 +415,52 @@ def _status(name):
 
 
 def test_doctor_states(env):
-    assert _status("bili") == "not_added"
-    manage.add("bili")
-    assert _status("bili") == "unverified"
-    manage.run_checks(["bili"])
-    assert _status("bili") == "ready"
-    Bili.passes = False
+    assert _status("demo") == "not_added"
+    manage.add("demo")
+    assert _status("demo") == "unverified"
+    manage.run_checks(["demo"])
+    assert _status("demo") == "ready"
+    Demo.passes = False
     try:
-        manage.run_checks(["bili"])
-        assert _status("bili") == "broken"
+        manage.run_checks(["demo"])
+        assert _status("demo") == "broken"
     finally:
-        Bili.passes = True
+        Demo.passes = True
     data = state.load()
-    data["checks"]["bili"]["at"] = "2000-01-01T00:00:00Z"
-    data["checks"]["bili"]["evidence"]["search"]["at"] = "2000-01-01T00:00:00Z"
+    data["checks"]["demo"]["at"] = "2000-01-01T00:00:00Z"
+    data["checks"]["demo"]["evidence"]["search"]["at"] = "2000-01-01T00:00:00Z"
     state.save(data)
-    assert _status("bili") == "unverified"
+    assert _status("demo") == "unverified"
 
 
 def test_doctor_reports_missing_tool_and_shows_versions(env):
-    manage.add("bili")
-    assert {"tool": "bili-cli", "owner": "agent-reach", "scope": "private", "version": "1.2.3"} in manage.doctor()["tools"]
-    tools.remove_private("bili-cli")
-    assert _status("bili") == "needs_setup"
+    manage.add("demo")
+    assert {"tool": "demo-cli", "owner": "agent-reach", "scope": "private", "version": "1.2.3"} in manage.doctor()["tools"]
+    tools.remove_private("demo-cli")
+    assert _status("demo") == "needs_setup"
 
 
 def test_check_without_names_tests_only_default_and_added_channels(env):
-    manage.add("bili")
+    manage.add("demo")
     tested = {r["channel"] for r in manage.run_checks()["results"]}
-    assert tested == {"web", "vid", "bili"}
+    assert tested == {"web", "vid", "demo"}
 
 
 def test_doctor_marks_regressed_only_when_the_previous_check_passed(env):
-    manage.add("bili")
-    manage.run_checks(["bili"])
-    assert _doctor("bili")["regressed"] is False
-    Bili.passes = False
+    manage.add("demo")
+    manage.run_checks(["demo"])
+    assert _doctor("demo")["regressed"] is False
+    Demo.passes = False
     try:
-        manage.run_checks(["bili"])
-        assert _doctor("bili")["regressed"] is True
-        state.mutate(lambda data: data["tools"].__setitem__("bili-cli", {"version": "changed"}))
-        assert _doctor("bili")["status"] == "unverified"
-        assert _doctor("bili")["regressed"] is False, "stale evidence cannot prove regression"
-        manage.run_checks(["bili"])
-        assert _doctor("bili")["regressed"] is False, "an already-broken channel is not a regression"
+        manage.run_checks(["demo"])
+        assert _doctor("demo")["regressed"] is True
+        state.mutate(lambda data: data["tools"].__setitem__("demo-cli", {"version": "changed"}))
+        assert _doctor("demo")["status"] == "unverified"
+        assert _doctor("demo")["regressed"] is False, "stale evidence cannot prove regression"
+        manage.run_checks(["demo"])
+        assert _doctor("demo")["regressed"] is False, "an already-broken channel is not a regression"
     finally:
-        Bili.passes = True
+        Demo.passes = True
 
 
 def _doctor(name):
@@ -537,8 +471,8 @@ def _doctor(name):
 
 
 class Broken(_Base):
-    name, level, actions, tools = "broken", "default", _actions(), ("bili-cli",)
-    login_argv = ("bili", "login")
+    name, level, actions, tools = "broken", "default", _actions(), ("demo-cli",)
+    login_argv = ("demo", "login")
 
 
 def test_setup_adds_default_channels_and_survives_a_failing_install(env, monkeypatch):
@@ -557,7 +491,7 @@ def test_setup_adds_default_channels_and_survives_a_failing_install(env, monkeyp
     assert result["logins"] == [{"channel": "broken", "command": "agent-reach login broken",
                                   "when": "only_if_required"}]
     optional = {c["channel"]: c["needs"] for c in result["optional_channels"]}
-    assert set(optional) == {"bili", "bili2", "needy", "site", "site2", "linky"}
+    assert set(optional) == {"demo", "demo2", "needy", "site", "site2", "linky"}
     assert optional["needy"] == [] and optional["site"] == ["login_if_required"]
     capabilities = {c["channel"]: c for c in result["capability_summary"]["channels"]}
     assert capabilities["site"]["reach_status"] == "not_added"
@@ -569,25 +503,25 @@ def test_setup_adds_default_channels_and_survives_a_failing_install(env, monkeyp
     report = result['installation_report']
     assert report['markdown'] == (state.root() / 'installation-report.md').read_text(encoding='utf-8')
     assert report['path'] == str(state.root() / 'installation-report.md')
-    assert '安装失败：UPSTREAM_BROKEN' in report['markdown']
+    assert 'UPSTREAM_BROKEN' in report['markdown']
 
 
 def test_setup_text_displays_compact_capability_table_and_keeps_json_mode(env, capsys, monkeypatch):
     from agent_reach.runtime import cli, onboarding
 
-    monkeypatch.setattr(onboarding, '_local_greeting', lambda: '早上好呀，想搜点什么？☀️')
+    monkeypatch.setattr(onboarding, '_local_greeting', lambda: 'GREETING')
 
     assert cli.main(['setup', '--text']) == 0
     text = capsys.readouterr().out
-    assert text.startswith('早上好呀，想搜点什么？☀️\n')
-    assert '| 平台 | 不登录可以查什么 | 需要登录后再试 |' in text
+    assert text.startswith('GREETING\n')
     assert text.count('|---|---|---|') == 1
-    assert '完整报告已保存：' in text
+    assert sum(line.startswith('| ') for line in text.splitlines()) == len(env["chans"]) + 1
+    assert str(state.root() / 'installation-report.md') in text
     assert not text.startswith('{')
     assert cli.main(['setup']) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload['ok']
-    assert payload['result']['installation_report']['markdown'] == text.split('\n完整报告已保存：')[0]
+    assert text.startswith(payload['result']['installation_report']['markdown'])
 
 
 def test_setup_receipt_never_overwrites_a_linked_foreign_file(env, tmp_path):
@@ -604,14 +538,14 @@ def test_setup_receipt_never_overwrites_a_linked_foreign_file(env, tmp_path):
     assert foreign.read_text() == 'keep this'
     assert result['installation_report']['path'] is None
     assert result['installation_report']['write_error']
-    assert '| 平台 | 不登录可以查什么 | 需要登录后再试 |' in result['installation_report']['markdown']
+    assert '|---|---|---|' in result['installation_report']['markdown']
 
 
 # ── uninstall ──
 
 
 def test_uninstall_removes_only_what_we_own(env):
-    manage.add("bili")
+    manage.add("demo")
     root = state.root()
     from agent_reach.config import Config
     Config().set("test", 1)
@@ -620,12 +554,12 @@ def test_uninstall_removes_only_what_we_own(env):
     update_notice.write_cache({"latest": "1.0.0", "notes": ""})
     dry = manage.uninstall(dry_run=True)
     assert (root / "state.json").exists(), "dry run changes nothing"
-    assert str(tools.tool_dir("bili-cli")) in dry["removed"]
+    assert str(tools.tool_dir("demo-cli")) in dry["removed"]
     assert env["stopped"] == []
     manage.uninstall()
     assert not (root / "state.json").exists() and not (root / "config.yaml").exists()
     assert not update_notice.cache_path().exists()
-    assert not tools.tool_dir("bili-cli").exists()
+    assert not tools.tool_dir("demo-cli").exists()
     assert (root / "my-notes").exists() and (root / "tools" / "someone-elses-tool").exists()
 
 
@@ -637,11 +571,10 @@ def test_uninstall_closes_the_browser_instead_of_refusing(env):
 
 
 def test_skill_lists_every_channel_and_has_no_placeholders(env):
-    for lang in ("zh", "en"):
-        text = manage.render_skill(lang)
-        assert "{{" not in text
-        for ch in env["chans"]:
-            assert f"| {ch.name} |" in text
+    text = manage.render_skill()
+    assert "{{" not in text and manage.__version__ in text
+    for ch in env["chans"]:
+        assert f"| {ch.name} |" in text
 
 
 def _seed_our_copy(path):
@@ -783,10 +716,10 @@ def test_doctor_separates_needs_login_from_broken(env, monkeypatch):
     def need_login(self, **kw):
         raise ReachError("NEED_LOGIN", "log in")
 
-    monkeypatch.setattr(Bili, "_go", need_login)
-    manage.add("bili")
-    manage.run_checks(["bili"])
-    assert _status("bili") == "needs_login"
+    monkeypatch.setattr(Demo, "_go", need_login)
+    manage.add("demo")
+    manage.run_checks(["demo"])
+    assert _status("demo") == "needs_login"
 
 
 def test_remove_browser_channel_forgets_grants_and_only_its_login(env):
@@ -818,16 +751,6 @@ def test_setup_preserves_unowned_or_changed_mcp_configuration(env):
     path.write_text(original)
     manage.setup()
     assert path.read_text()==original
-
-
-@pytest.mark.parametrize("owner", [tools.OURS, "user"])
-def test_setup_prunes_only_our_retired_mcp_transport(env, owner):
-    folder = tools.tool_dir("mcporter")
-    folder.mkdir(parents=True)
-    (folder / "keep-or-remove").write_text("fixture")
-    state.mutate(lambda data: data["tools"].update(mcporter={"owner": owner}))
-    manage.setup()
-    assert folder.exists() == (owner != tools.OURS)
 
 
 def test_retired_mcp_cleanup_preserves_changed_private_path(env, monkeypatch):
@@ -866,7 +789,7 @@ def test_skill_unlink_survives_update_until_linked_again(env):
     assert (claude / "agent-reach").is_symlink(), "link clears the opt-out"
 
 
-@pytest.mark.parametrize("method", ["uv", "other"])
+@pytest.mark.parametrize("method", ["uv"])
 @pytest.mark.parametrize("returncode,payload", [
     (1, {"ok": True, "result": {"user_actions": []}, "error": None}),
     (0, {"ok": False, "result": None, "error": {"code": "NEED_SETUP"}}),

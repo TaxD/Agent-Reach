@@ -12,8 +12,9 @@ Kinds:
   port and a Chrome extension). A user copy inside the limits is used as is; an
   out-of-limits user copy is upgraded only with explicit consent; when missing
   it is installed into ~/.agent-reach/tools/npm-global/ and recorded as ours.
-- prerequisites (node, uv, ffmpeg, chrome): the system copy is used when there
-  is one; otherwise a private copy is installed without an admin password.
+- prerequisites (node, ffmpeg): the system copy is used when there is one;
+  otherwise a private copy is installed without an admin password.
+- chrome: only an installed Google Chrome/Chromium is used; nothing is downloaded.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ OURS = "agent-reach"
 @dataclass(frozen=True)
 class Tool:
     name: str
-    kind: str                       # "pip" | "npm" | "ffmpeg" | "node" | "uv" | "chrome"
+    kind: str                       # "pip" | "npm" | "ffmpeg" | "node" | "chrome"
     package: str                    # pip requirement / npm package name ("" for prerequisites)
     commands: Tuple[str, ...]       # executables it provides
     singleton: bool = False
@@ -54,17 +55,9 @@ class Tool:
 TOOLS: Dict[str, Tool] = {
     t.name: t
     for t in (
-        Tool("cloakbrowser", "pip", "cloakbrowser", ("cloakbrowser",), tested="0.6.3"),
-        Tool("bili-cli", "pip", "bilibili-cli", ("bili",), tested="0.6.2"),
-        Tool(
-            "boss-agent-cli", "pip",
-            "boss-agent-cli @ https://github.com/can4hou6joeng4/boss-agent-cli/archive/4c991b77086a203173bf08a4cb64a23af6514fe6.zip",
-            ("boss",),
-        ),
         Tool("opencli", "npm", "@jackwener/opencli", ("opencli",), singleton=True, floor="1.8.7", exclude=("1.8.8",), tested="2.0.3", needs=("node",)),
-        Tool("ffmpeg", "ffmpeg", "imageio-ffmpeg", ("ffmpeg",)),
+        Tool("ffmpeg", "ffmpeg", "imageio-ffmpeg", ("ffmpeg",), tested="0.8.1"),
         Tool("node", "node", "", ("node", "npm", "npx")),
-        Tool("uv", "uv", "", ("uv", "uvx")),
         Tool("chrome", "chrome", "", ()),
     )
 }
@@ -110,20 +103,20 @@ def _private_bin(tool: Tool, command: str) -> Path:
         return base / "node_modules" / ".bin" / (command + (".cmd" if _WIN else ""))
     if tool.kind == "node":
         return _node_bin_dir() / (command + (".cmd" if _WIN and command != "node" else ".exe" if _WIN else ""))
-    if tool.kind in ("uv", "ffmpeg"):
+    if tool.kind == "ffmpeg":
         return base / "bin" / _exe(command)
     return base / command
 
 
 def bin_dirs() -> List[Path]:
-    """Private bin folders that exist (node, our npm -g prefix, uv, ffmpeg)."""
-    dirs = [_node_bin_dir(), _npm_global_bin(), tool_dir("uv") / "bin", tool_dir("ffmpeg") / "bin"]
+    """Private bin folders that exist (node, our npm -g prefix, ffmpeg)."""
+    dirs = [_node_bin_dir(), _npm_global_bin(), tool_dir("ffmpeg") / "bin"]
     return [d for d in dirs if d.is_dir()]
 
 
 def extend_path() -> None:
     """Append our private bin folders to PATH (system copies still win), so that
-    upstream scripts find node/uvx/ffmpeg and children we start inherit them."""
+    upstream scripts find node/ffmpeg and children we start inherit them."""
     parts = os.environ.get("PATH", "").split(os.pathsep)
     extra = [str(d) for d in bin_dirs() if str(d) not in parts]
     if extra:
@@ -420,27 +413,6 @@ def _install_node(tool: Tool) -> None:
         shutil.move(str(out / stem), str(dest / "current"))
 
 
-def _install_uv(tool: Tool) -> None:
-    dest = tool_dir("uv") / "bin"
-    env = {"UV_INSTALL_DIR": str(dest), "UV_NO_MODIFY_PATH": "1", "INSTALLER_NO_MODIFY_PATH": "1"}
-    if _WIN:
-        _run(["powershell", "-ExecutionPolicy", "ByPass", "-c", "irm https://astral.sh/uv/install.ps1 | iex"], env=env)
-    else:
-        from agent_reach.utils.paths import private_temporary_directory
-
-        with private_temporary_directory(prefix="uv-") as tmp:
-            script = Path(tmp) / "install.sh"
-            _download("https://astral.sh/uv/install.sh", script)
-            _run(["sh", str(script)], env=env)
-    nested = dest / "bin"  # older installers add a bin/ below UV_INSTALL_DIR
-    if nested.is_dir():
-        for f in nested.iterdir():
-            shutil.move(str(f), str(dest / f.name))
-        nested.rmdir()
-    if not _private_bin(tool, "uvx").exists():
-        raise ReachError(UPSTREAM_BROKEN, "the uv installer finished but uvx is missing")
-
-
 def _install(tool: Tool, *, global_: bool = False) -> None:
     """Install (or upgrade) one tool. Singletons: global_=True (our npm -g prefix)."""
     folder = npm_global_dir() if global_ else tool_dir(tool.name)
@@ -453,8 +425,6 @@ def _install(tool: Tool, *, global_: bool = False) -> None:
         _install_npm(tool, global_prefix=npm_global_dir() if global_ else None)
     elif tool.kind == "node":
         _install_node(tool)
-    elif tool.kind == "uv":
-        _install_uv(tool)
     else:
         raise ReachError(UPSTREAM_BROKEN, f"no installer for {tool.name}")
     extend_path()
@@ -524,21 +494,9 @@ def ensure(name: str, *, allow_upgrade: bool = False, upgrade: bool = False) -> 
         return record(name, installed_version(tool), owner=entry.get("owner", "user"), scope="global")
 
     private_ok = all(_private_bin(tool, c).exists() for c in tool.commands)
-    if tool.kind in ("node", "uv", "ffmpeg") and not private_ok and all(shutil.which(c) for c in tool.commands):
+    if tool.kind in ("node", "ffmpeg") and not private_ok and all(shutil.which(c) for c in tool.commands):
         return {"tool": name, "owner": "system", "scope": "system", "version": None}
-    pinned_mismatch = False
-    if private_ok and tool.name == "boss-agent-cli":
-        venv = tool_dir(tool.name) / "venv"
-        sources = list(venv.glob("**/boss_agent_cli-*.dist-info/direct_url.json"))
-        expected = tool.package.split(" @ ", 1)[-1].strip()
-        try:
-            source = json.loads(sources[0].read_text()) if sources else {}
-            commit = expected.rsplit("/", 1)[-1].removesuffix(".zip")
-            pinned_mismatch = not (source.get("url") == expected or
-                source.get("vcs_info", {}).get("commit_id") == commit)
-        except (OSError, ValueError):
-            pinned_mismatch = True
-    if not private_ok or not ours or upgrade or pinned_mismatch:
+    if not private_ok or not ours or upgrade:
         _install(tool)
     elif entry.get("version"):
         return {"tool": name, **entry}

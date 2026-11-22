@@ -1,61 +1,55 @@
-# Install or update Agent Reach
+# Agent Reach 설치와 업데이트
 
-For the AI doing the work. This one guide covers a fresh install, an update, and an upgrade from 1.5 or earlier. Run every command yourself. Each `agent-reach` command (1.6 and later) prints one JSON object; read `ok`, `result` and `error.hint`.
+작업을 수행하는 AI를 위한 안내입니다. 모든 명령은 직접 실행하십시오. `agent-reach` 명령은 JSON 객체 하나를 출력하므로 `ok`, `result`, `error.hint`를 읽고 판단합니다.
 
-> ⚠️ The PyPI package named `agent-reach` is NOT this project. Never install it from PyPI; only use the GitHub URL below.
+> PyPI의 `agent-reach` 패키지는 이 프로젝트가 아닙니다. PyPI에서 설치하지 말고 아래의 GitHub 주소만 사용하십시오.
 
-## 0. Before you start
+## 0. 시작하기 전에
 
-- You must be able to run terminal commands. If you can't, tell the user: "Please turn on command execution for me in my settings, then ask again."
-- Is it already installed? Run `agent-reach version`:
-  - it prints JSON (1.6 and later) → go to [Update](#update).
-  - it prints a plain line like `Agent Reach v1.5.0` → go to [Upgrade from 1.5 or earlier](#upgrade-from-15-or-earlier).
-  - `agent-reach` is not found → continue below.
-- `uv` missing (`uv --version` fails)? Tell the user: "I'm installing uv, a small tool that installs command-line programs. It needs no admin password." Then run:
-  - macOS / Linux: `curl -LsSf https://astral.sh/uv/install.sh | sh`
-  - Windows: `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`
-  - Still `uv: command not found`? Open a new shell and try again.
+- 터미널 명령을 실행할 수 있어야 합니다.
+- 이미 설치되어 있는지 확인합니다: `agent-reach version`이 JSON을 출력하면 [업데이트](#업데이트)로 이동합니다.
+- `uv --version`이 실패하면 사용자에게 uv 설치를 요청하십시오(<https://docs.astral.sh/uv/getting-started/installation/>). Homebrew가 있으면 `brew install uv`가 가장 간단합니다. 검증되지 않은 설치 스크립트를 사용자 동의 없이 파이프로 실행하지 마십시오.
 
-## 1. Install and set up
+## 1. 설치와 설정
 
 ```bash
-uv tool install https://github.com/Panniantong/Agent-Reach/releases/latest/download/agent-reach.zip
+uv tool install git+https://github.com/TaxD/Agent-Reach
+```
+
+```bash
 agent-reach setup
 ```
 
-`agent-reach` not found after install? Run `uv tool update-shell` and open a new shell.
+설치 후 `agent-reach`를 찾지 못하면 `uv tool update-shell`을 실행하고 새 셸을 여십시오.
 
-`setup` turns on the default channels and installs the agent skill.
+`setup`은 기본 채널을 켜고 에이전트 스킬을 설치합니다. 기본 채널은 대부분 추가 도구가 필요 없고, `youtube`만 ffmpeg를 준비합니다(시스템에 있으면 그것을 사용).
 
-## 2. Report to the user
+## 2. 사용자에게 보고
 
-Show `result.installation_report.markdown` to the user as is. The program generates it; do not rewrite, reorder or add to it.
+`result.installation_report.markdown`을 그대로 사용자에게 보여 주십시오. 프로그램이 생성한 보고서이므로 고쳐 쓰거나 순서를 바꾸거나 덧붙이지 않습니다.
 
-## Update
+## 업데이트
 
 ```bash
 agent-reach update
 ```
 
-It upgrades the program, every added channel's tools and the skill. Tell the user each line of `result.user_actions`, and show `result.installation_report.markdown` as is when it is present. If it fails, `error.hint` holds the exact command to run.
+프로그램, 추가된 채널의 도구, 스킬을 갱신합니다. `result.user_actions`의 각 줄을 사용자에게 전달하십시오. 실패하면 `error.hint`에 실행할 명령이 들어 있습니다.
 
-## Upgrade from 1.5 or earlier
+로컬 복제본에서 설치한 경우에는 복제본을 갱신한 뒤 다시 설치합니다.
 
-1.6 is installed with uv; 1.5 was installed with pipx or pip. Tell the user: "This is a big upgrade. Your keys and settings are kept; I'm moving Agent Reach to the new installer." Then:
+```bash
+uv tool install --force /path/to/Agent-Reach
+```
 
-1. Install uv if it is missing (see step 0).
-2. Install 1.6:
-   ```bash
-   uv tool install --force https://github.com/Panniantong/Agent-Reach/releases/latest/download/agent-reach.zip
-   ```
-3. Open a new shell and check `agent-reach version` prints JSON. If it still prints the old line, run `uv tool update-shell`, open a new shell and check again.
-4. Run `agent-reach setup`. It keeps `~/.agent-reach/config.yaml`, removes the old Agent Reach program (only Agent Reach itself, never the user's other tools) and refreshes the skill for every AI.
-5. Show `result.installation_report.markdown` to the user as is. It explains what changed and which old channels they can add back.
+```bash
+agent-reach update --sync-only
+```
 
-## Later
+## 이후
 
-- The user just says what they want, e.g. "add Xiaohongshu" → `agent-reach add <channel>`; "remove V2EX" → `agent-reach remove <channel>`.
-- Keys are entered by the user, e.g. a Groq key for Xiaoyuzhou transcription: `agent-reach configure groq-key`.
-- Everything else (usage, login, browser) is covered by the installed skill.
+- 사용자는 원하는 것을 말하기만 하면 됩니다. 예: "트위터 추가해 줘" → `agent-reach add twitter`
+- 키는 사용자가 직접 입력합니다. 예: YouTube 전사용 Groq 키 → `agent-reach configure groq-key`
+- 그 밖의 사용법, 로그인, 브라우저 관련 내용은 설치된 스킬 문서에 있습니다.
 
-Problems and rolling back: [troubleshooting.md](troubleshooting.md).
+문제 해결과 이전 버전으로 되돌리기: [troubleshooting.md](troubleshooting.md)

@@ -2,7 +2,7 @@
 """
 Channel base class.
 
-Each channel represents a platform (YouTube, GitHub, V2EX, ...) and declares:
+Each channel represents a platform (YouTube, GitHub, Hacker News, ...) and declares:
   - can_handle(url) → does this URL belong to this platform? (used by `read`)
   - level → "default" / "optional" / "experimental"
   - actions → unified actions (`agent-reach <channel> <action>`), each with an
@@ -53,7 +53,9 @@ class Channel(ABC):
     """Base class for all channels."""
 
     name: str = ""                    # e.g. "youtube"
-    description: str = ""             # e.g. "YouTube 视频和字幕"
+    description: str = ""             # short label, e.g. "YouTube 영상과 자막"
+    #: For the agent: when to pick this channel over the others (Korean, 1-2 sentences).
+    purpose: str = ""
 
     #: "default" / "optional" / "experimental".
     level: str = ""
@@ -74,7 +76,7 @@ class Channel(ABC):
     domains: Tuple[str, ...] = ()
     #: Upstream tools (keys of runtime.tools.TOOLS) `agent-reach add` installs.
     tools: Tuple[str, ...] = ()
-    #: Machine prerequisites (node, uv, ffmpeg, chrome; keys of runtime.tools.TOOLS)
+    #: Machine prerequisites (node, ffmpeg, chrome; keys of runtime.tools.TOOLS)
     #: that `agent-reach add` installs when the machine has none.
     prereqs: Tuple[str, ...] = ()
     #: Config keys `agent-reach logout` clears.

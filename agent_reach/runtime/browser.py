@@ -1,9 +1,10 @@
 """The Agent Reach dedicated browser.
 
 One Reach-owned profile under ~/.agent-reach/browser/profile is shared by all
-browser channels. CloakBrowser is preferred; installation/download failure falls
-back to installed Chrome. The existing watcher owns the browser, loads OpenCLI,
-and closes it after 600 seconds without use. Website adapters stay upstream.
+browser channels. Only an installed Google Chrome/Chromium is used: no browser
+binary is downloaded and no anti-detection build is involved. The watcher owns
+the browser, loads the pinned OpenCLI extension, and closes it after 600 seconds
+without use. Website adapters stay upstream.
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ DEFAULT_CDP_PORT = 9222
 def configured_port() -> int:
     """Port from `agent-reach configure browser-port`, else 9222 (another tool may own 9222).
 
-    The watcher runs under the CloakBrowser Python (no yaml), so `_launch` hands it the port in the environment.
+    `_launch` hands the watcher the port in the environment.
     """
     with contextlib.suppress(Exception):
         raw = os.environ.get("REACH_BROWSER_PORT")
@@ -69,8 +70,15 @@ _LOCK_WAIT = START_WAIT + 30.0
 #: How long Windows setup waits for the user to add the extension from the Web Store.
 _STORE_WAIT = 180.0
 
-OPENCLI_RELEASE_API = "https://api.github.com/repos/jackwener/OpenCLI/releases/latest"
-_EXTENSION_ASSET_RE = re.compile(r"^opencli-extension-.*\.zip$")
+#: The browser extension can read every cookie of the dedicated profile, so it is
+#: pinned to one reviewed release asset and verified by SHA-256 before unpacking.
+#: Bump the three values together with the tested OpenCLI version in tools.py.
+OPENCLI_EXTENSION_ASSET = "opencli-extension-v1.0.27.zip"
+OPENCLI_EXTENSION_URL_PINNED = (
+    "https://github.com/jackwener/OpenCLI/releases/download/v2.0.3/" + OPENCLI_EXTENSION_ASSET
+)
+OPENCLI_EXTENSION_SHA256 = "8636d42a0fe44d7ba3b0603dbcd9581e8269ccbca950136d0dfc0ffc39a8a213"
+_MAX_EXTENSION_BYTES = 16 * 1024 * 1024
 _USER_AGENT = "agent-reach"
 
 
@@ -259,38 +267,26 @@ def wait_for(check: Callable[[], bool], seconds: float, interval: float = 1.0) -
 # ── downloads ──
 
 
-def _fetch(url: str, timeout: float = 30.0) -> bytes:
-    """GET `url` (honours the OS / env proxy settings)."""
-    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
-
-
 def _download(url: str, dest: Path, timeout: float = 60.0) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as out:
-        shutil.copyfileobj(resp, out, 1 << 20)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = resp.read(_MAX_EXTENSION_BYTES + 1)
+    dest.write_bytes(body)
 
 
 def _unzip(archive: Path, dest: Path) -> None:
-    """Extract keeping symlinks and exec bits (a Chrome .app is full of both)."""
-    if platform.system() == "Darwin" and shutil.which("ditto"):
-        subprocess.run(["ditto", "-x", "-k", str(archive), str(dest)], check=True, capture_output=True, timeout=600)
-        return
+    """Extract regular files only; refuse traversal, absolute paths and symlinks."""
     root = dest.resolve()
     with zipfile.ZipFile(archive) as zf:
+        if sum(info.file_size for info in zf.infolist()) > 4 * _MAX_EXTENSION_BYTES:
+            raise ValueError("archive expands beyond the size limit")
         for info in zf.infolist():
             target = (dest / info.filename).resolve()
             if target != root and root not in target.parents:
                 raise ValueError(f"unsafe path in archive: {info.filename}")
-            mode = info.external_attr >> 16
-            if (mode & 0o170000) == 0o120000:  # symlink
-                target.parent.mkdir(parents=True, exist_ok=True)
-                os.symlink(zf.read(info).decode("utf-8"), target)
-                continue
+            if ((info.external_attr >> 16) & 0o170000) == 0o120000:
+                raise ValueError(f"symlink in archive: {info.filename}")
             zf.extract(info, dest)
-            if mode & 0o111 and not info.is_dir():
-                os.chmod(target, (mode & 0o777) | 0o600)
 
 
 # ── Chrome ──
@@ -325,40 +321,24 @@ def chrome_binary() -> Optional[str]:
     return _system_chrome()
 
 
-def ensure_chrome(*, retry_cloak: bool = False) -> str:
-    """Prepare CloakBrowser, falling back only to an installed system Chrome."""
+def ensure_chrome() -> str:
+    """Use the Chrome/Chromium already installed on this machine; never download a browser."""
     from .result import NEED_SETUP, ReachError
 
-    selected = chrome_binary()
-    if selected and _load_state().get("backend") and not retry_cloak:
-        return selected
-    from agent_reach.backends import cloak
-    try:
-        installed = cloak.setup()
-    except ReachError as exc:
-        fallback = _system_chrome()
-        if not fallback:
-            raise ReachError(exc.code, f"CloakBrowser could not be installed: {exc.message}",
-                             hint=exc.hint or "Check the download/proxy connection, or install Chrome, then run agent-reach browser setup.") from exc
-        update_state(backend="chrome", executable=fallback, launcher_python=None,
-                     fallback_reason=f"{exc.code}: {exc.message}")
-        return fallback
-    except OSError as exc:
-        fallback = _system_chrome()
-        if not fallback:
-            raise ReachError(NEED_SETUP, f"CloakBrowser could not be installed: {exc}",
-                             hint="Check the download/proxy connection, or install Chrome, then run agent-reach browser setup.") from exc
-        update_state(backend="chrome", executable=fallback, launcher_python=None,
-                     fallback_reason=f"CloakBrowser installation/download failed: {exc}")
-        return fallback
-    update_state(backend="cloakbrowser", executable=installed["executable"],
-                 launcher_python=installed["python"], fallback_reason=None)
-    return installed["executable"]
+    selected = _system_chrome()
+    if not selected:
+        raise ReachError(NEED_SETUP, "Google Chrome is not installed",
+                         hint="Ask the user to install Google Chrome from https://www.google.com/chrome/, "
+                              "then run agent-reach browser setup. Reach never downloads a browser itself.")
+    saved = _load_state()
+    if saved.get("backend") != "chrome" or saved.get("executable") != selected:
+        update_state(backend="chrome", executable=selected, launcher_python=None, fallback_reason=None)
+    return selected
 
 
 def can_load_extension() -> bool:
-    """Cloak loads extensions everywhere; system Chrome uses pipe loading on POSIX."""
-    return _load_state().get("backend") == "cloakbrowser" or sys.platform != "win32"
+    """System Chrome loads the unpacked extension over the launch pipe (POSIX only)."""
+    return sys.platform != "win32"
 
 
 def chrome_argv(exe: str, url: str, *, pipe: bool, headless: bool = True) -> List[str]:
@@ -391,25 +371,18 @@ def extension_version() -> Optional[str]:
 
 
 def refresh_extension(*, upgrade: bool = False) -> dict:
-    """Install or update the OpenCLI extension from the latest OpenCLI release.
+    """Install the pinned OpenCLI extension after verifying its SHA-256.
 
-    Keeps the current copy when GitHub is unreachable; raises only if there is none.
-    Returns {"version", "updated"}. A running browser is closed before files change.
+    Returns {"version", "updated"}. `upgrade` reinstalls when the installed copy is
+    not the pinned asset. A running browser is closed before files change.
     """
+    import hashlib
+
     from .result import UPSTREAM_BROKEN, ReachError
 
     current = extension_version()
-    if current and not upgrade:
-        return {"version": current, "updated": False}
-    try:
-        release = json.loads(_fetch(OPENCLI_RELEASE_API))
-        asset = next(a for a in release.get("assets", []) if _EXTENSION_ASSET_RE.match(a.get("name", "")))
-    except Exception as exc:  # noqa: BLE001
-        if current:
-            return {"version": current, "updated": False}
-        raise ReachError(UPSTREAM_BROKEN, f"could not find the OpenCLI extension release: {exc}") from None
-    state = _load_state()
-    if current and state.get("extension_asset") == asset["name"]:
+    pinned = _load_state().get("extension_sha256") == OPENCLI_EXTENSION_SHA256
+    if current and (pinned or not upgrade):
         return {"version": current, "updated": False}
     from . import state as ledger
     make_private_dir(browser_root())
@@ -417,7 +390,12 @@ def refresh_extension(*, upgrade: bool = False) -> dict:
     work = Path(tempfile.mkdtemp(prefix=".extension-", dir=browser_root()))
     try:
         archive = work / "extension.zip"
-        _download(asset["browser_download_url"], archive)
+        _download(OPENCLI_EXTENSION_URL_PINNED, archive)
+        if archive.stat().st_size > _MAX_EXTENSION_BYTES:
+            raise ReachError(UPSTREAM_BROKEN, "the OpenCLI extension download is unexpectedly large; not installed")
+        if hashlib.sha256(archive.read_bytes()).hexdigest() != OPENCLI_EXTENSION_SHA256:
+            raise ReachError(UPSTREAM_BROKEN, "the OpenCLI extension download failed its checksum; not installed",
+                             hint="The pinned release asset changed or the download was tampered with. Do not retry in a loop.")
         unpacked = work / "unpacked"
         unpacked.mkdir()
         _unzip(archive, unpacked)
@@ -425,9 +403,6 @@ def refresh_extension(*, upgrade: bool = False) -> dict:
         if manifest is None:
             raise ValueError("no manifest.json in the extension zip")
         version = json.loads(manifest.read_text("utf-8")).get("version")
-        if current and version == current:
-            update_state(extension_asset=asset["name"], extension_version=version)
-            return {"version": version, "updated": False}
         if is_running():
             stop()  # never swap files under a running extension; the next launch loads the new one
         shutil.rmtree(extension_dir(), ignore_errors=True)
@@ -435,12 +410,11 @@ def refresh_extension(*, upgrade: bool = False) -> dict:
     except ReachError:
         raise
     except Exception as exc:  # noqa: BLE001
-        if current and extension_version():
-            return {"version": current, "updated": False}
         raise ReachError(UPSTREAM_BROKEN, f"could not install the OpenCLI extension: {exc}") from None
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    update_state(extension_asset=asset["name"], extension_version=version)
+    update_state(extension_asset=OPENCLI_EXTENSION_ASSET, extension_version=version,
+                 extension_sha256=OPENCLI_EXTENSION_SHA256)
     return {"version": version, "updated": True}
 
 
@@ -466,17 +440,13 @@ def _detach_kwargs() -> dict:
 def _launch(url: str, *, headless: bool = True) -> None:
     """Start the dedicated browser. Caller holds start_lock().
 
-    The watcher launches Cloak through its public SDK on every OS. System
-    Chrome fallback uses pipe loading on POSIX and Web Store loading on Windows.
+    Installed Chrome uses pipe loading on POSIX and Web Store loading on Windows.
     """
-    from agent_reach.config import Config
-
     from .result import UPSTREAM_BROKEN, ReachError
 
     if is_running():
         raise ReachError(UPSTREAM_BROKEN, "The dedicated debugging port is already in use; no browser was changed")
     exe = ensure_chrome()
-    _prepare_shared_profile()
     make_private_dir(profile_dir())
     from . import state as ledger
     ledger.remember_path(profile_dir(), "dedicated browser profile")
@@ -496,15 +466,11 @@ def _launch(url: str, *, headless: bool = True) -> None:
     # A watcher still exiting from the last browser holds its lock for a moment; the new one waits for it.
     with open(watcher_log_path(), "wb") as log:
         proc = subprocess.Popen(
-            [_load_state().get("launcher_python") or sys.executable, "-m", "agent_reach.runtime.browser_watcher",
-             "--launch", url, "--chrome", exe, *(["--cloak"] if _load_state().get("backend") == "cloakbrowser" else []),
-             *([] if headless else ["--headed"])],
+            [sys.executable, "-m", "agent_reach.runtime.browser_watcher",
+             "--launch", url, "--chrome", exe, *([] if headless else ["--headed"])],
             stdin=subprocess.DEVNULL, stdout=log, stderr=log,
             env={**os.environ, "PYTHONPATH": str(Path(__file__).parents[2]),
-                 "CLOAKBROWSER_AUTO_UPDATE": "false",
-                 "REACH_BROWSER_PROXY": str(Config(read_only=True).get("proxy") or ""),
-                 "REACH_BROWSER_PORT": str(CDP_PORT),
-                 "CLOAKBROWSER_CACHE_DIR": str(browser_root().parent / "cloak-binaries")}, **_detach_kwargs(),
+                 "REACH_BROWSER_PORT": str(CDP_PORT)}, **_detach_kwargs(),
         )
     if not wait_for(lambda: is_running() or proc.poll() is not None, START_WAIT, interval=0.2) or not is_running():
         tail = ""
@@ -523,30 +489,6 @@ def _spawn_watcher() -> None:
     )
     # Hold start_lock until the watcher owns its lock, so a racing launch sees it.
     wait_for(watcher_running, 5.0, interval=0.1)
-
-
-def _prepare_shared_profile() -> None:
-    """Keep the old Chrome profile recoverable when changing browser engines."""
-    selected = _load_state()
-    if (selected.get("backend") != "cloakbrowser" or selected.get("profile_backend") == "cloakbrowser"
-            or not profile_dir().is_dir()):
-        return
-    if not (browser_root() / "session.json").is_file() and _system_chrome():
-        # An older Reach may have saved only Chrome's encrypted Cookie database.
-        # Briefly open that Reach-owned profile to export it, never a personal profile.
-        try:
-            update_state(backend="chrome", executable=_system_chrome(), launcher_python=None)
-            _launch("about:blank")
-            save_session()
-            stop()
-        finally:
-            update_state(backend=selected.get("backend"), executable=selected.get("executable"),
-                         launcher_python=selected.get("launcher_python"))
-    backup = browser_root() / ("profile-before-cloak-" + str(time.time_ns()))
-    profile_dir().rename(backup)
-    from . import state as ledger
-    ledger.remember_path(backup, "previous dedicated profile backup")
-    update_state(profile_backend="cloakbrowser", profile_backup=str(backup))
 
 
 def _remaining_start_wait() -> float:
@@ -842,7 +784,7 @@ def bind() -> dict:
     return {"status": "waiting_for_extension"}
 
 
-def setup(*, retry_cloak: bool = False, headless: bool = True) -> dict:
+def setup(*, headless: bool = True) -> dict:
     """Make the dedicated browser ready with the OpenCLI extension loaded and bound; returns status().
 
     macOS/Linux: fully automatic. Windows: opens the Web Store page and waits for the user's click.
@@ -851,10 +793,7 @@ def setup(*, retry_cloak: bool = False, headless: bool = True) -> dict:
     from .clock import off_the_clock
 
     with off_the_clock():
-        if retry_cloak:
-            ensure_chrome(retry_cloak=True)
-        else:
-            ensure_chrome()
+        ensure_chrome()
         if not can_load_extension() and not bound_context():
             return _setup_from_store()
         if can_load_extension():
@@ -926,7 +865,6 @@ def status() -> dict:
         "profile_dir": str(profile_dir()),
         "chrome": chrome_binary(),
         "backend": _load_state().get("backend"),
-        "fallback_reason": _load_state().get("fallback_reason"),
         "extension_version": extension_version(),
         "running": running,
         "headless": _load_state().get("headless") if running else None,

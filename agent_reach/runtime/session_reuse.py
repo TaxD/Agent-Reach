@@ -1,14 +1,13 @@
-"""Site-scoped local session reuse. Source browsers are read-only and never cloned.
+"""Site-scoped local session reuse, only on the user's explicit request.
 
-The user removed the dedicated-only policy. Use existing connected browsers,
-then saved Reach state, before requesting a human login. No password/keychain API.
+Cookies are never copied from another browser implicitly. A query uses the
+dedicated browser as it is; `agent-reach login <channel> --import-existing`
+(prepare(force=True)) is the only path that reads one site's cookies from a
+connected browser profile. Source browsers are read-only. No password/keychain API.
 """
 from __future__ import annotations
 
-import json
 import time
-
-from agent_reach.utils.paths import PrivatePathError, read_small_text_no_follow
 
 from . import bridge, browser, cdp, state
 from .browser_binding import wait_lock
@@ -76,20 +75,11 @@ def _source_cookies(channel: str, domains) -> tuple[list, str]:
     if len(found) > 1:
         raise ReachError(NEED_SETUP, "Several local browsers have cookies for this site; choose which account to reuse",
                          hint="Run agent-reach browser profiles, then browser use ID. No account was copied.")
-    if found:
-        return found[0]
-    # Older Reach versions stored the user's login in a per-site owned snapshot.
-    source = state.root() / "sessions" / (channel + "-cloak") / "profile" / "reach-session.json"
-    try:
-        data = json.loads(read_small_text_no_follow(source, max_bytes=2 * 1024 * 1024) or "{}")
-        cookies = _cookies(data.get("cookies", []), domains)
-    except (OSError, ValueError, PrivatePathError):
-        cookies = []
-    return cookies, "saved-reach-session" if cookies else "saved-profile"
+    return found[0] if found else ([], "none")
 
 
 def prepare(channel: str, *, force: bool = False) -> dict:
-    """Reuse an imported site session until explicitly refreshed; verify access separately."""
+    """Copy one site's login from a connected browser, only when `force` (explicit user request)."""
     from .manage import _channel, site_domains
     ch = _channel(channel)
     if not ch.login_url:
@@ -98,9 +88,9 @@ def prepare(channel: str, *, force: bool = False) -> dict:
     with wait_lock(f"session:{channel}"):
         browser.ensure_running()
         record = state.load().get("session_reuse", {}).get(channel, {})
-        if not force and (record.get("blocked") or record.get("source") == "manual"
-                          or (record.get("cookie_snapshot") == 1 and record.get("copied_cookies", 0) > 0)):
-            return record
+        if not force:
+            # Security: an ordinary query must never pull credentials out of another browser.
+            return record or {"source": "not_imported", "copied_cookies": 0}
         cookies, source = _source_cookies(channel, site_domains(ch))
         # Source discovery tolerates a disconnected optional Bridge for native
         # CLI sessions. A browser-backed action still needs it before recording

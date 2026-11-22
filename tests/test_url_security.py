@@ -2,17 +2,14 @@
 
 import pytest
 
-from agent_reach.channels.bilibili import BilibiliChannel
-from agent_reach.channels.facebook import FacebookChannel
+from agent_reach.channels.bluesky import BlueskyChannel
+from agent_reach.channels.devto import DevToChannel
+from agent_reach.channels.feed_sites import GeekNewsChannel, MediumChannel
 from agent_reach.channels.github import GitHubChannel
-from agent_reach.channels.instagram import InstagramChannel
-from agent_reach.channels.linkedin import LinkedInChannel
+from agent_reach.channels.hackernews import HackerNewsChannel
 from agent_reach.channels.reddit import RedditChannel
+from agent_reach.channels.stackoverflow import StackOverflowChannel
 from agent_reach.channels.twitter import TwitterChannel
-from agent_reach.channels.v2ex import V2EXChannel
-from agent_reach.channels.xiaohongshu import XiaoHongShuChannel
-from agent_reach.channels.xiaoyuzhou import XiaoyuzhouChannel
-from agent_reach.channels.xueqiu import XueqiuChannel
 from agent_reach.channels.youtube import YouTubeChannel
 from agent_reach.utils.url import host_matches
 
@@ -22,11 +19,7 @@ from agent_reach.utils.url import host_matches
     [
         (TwitterChannel(), "https://mobile.twitter.com/user/status/1"),
         (TwitterChannel(), "https://X.COM./user/status/1"),
-        (XiaoHongShuChannel(), "https://www.xiaohongshu.com/explore/1"),
-        (XiaoHongShuChannel(), "https://xhslink.com/a/1"),
-        (BilibiliChannel(), "https://www.bilibili.com/video/BV1"),
-        (BilibiliChannel(), "https://b23.tv/abc"),
-        (XueqiuChannel(), "https://stock.xueqiu.com/v5/stock/quote"),
+        (RedditChannel(), "https://old.reddit.com/r/python"),
     ],
 )
 def test_credential_channels_accept_exact_hosts_and_subdomains(channel, valid_url):
@@ -41,85 +34,38 @@ def test_credential_channels_accept_exact_hosts_and_subdomains(channel, valid_ur
         (TwitterChannel(), "https://x.com@evil.test/user/status/1"),
         (TwitterChannel(), "https://user:pass@x.com/user/status/1"),
         (TwitterChannel(), "ftp://x.com/user/status/1"),
-        (XiaoHongShuChannel(), "https://xiaohongshu.com.evil.test/explore/1"),
-        (XiaoHongShuChannel(), "https://xiaohongshu.com@evil.test/explore/1"),
-        (BilibiliChannel(), "https://bilibili.com.evil.test/video/BV1"),
-        (BilibiliChannel(), "https://b23.tv@evil.test/abc"),
-        (XueqiuChannel(), "https://xueqiu.com.evil.test/S/SH600519"),
-        (XueqiuChannel(), "https://xueqiu.com@evil.test/S/SH600519"),
+        (RedditChannel(), "https://reddit.com.evil.test/r/python"),
+        (RedditChannel(), "https://reddit.com@evil.test/r/python"),
     ],
 )
 def test_credential_channels_reject_lookalikes_and_userinfo(channel, malicious_url):
     assert not channel.can_handle(malicious_url)
 
 
-@pytest.mark.parametrize(
-    ("channel", "subdomain_url", "port_url"),
-    [
-        (
-            GitHubChannel(),
-            "https://api.github.com/repos/openai/openai-python",
-            "https://github.com:443/openai/openai-python",
-        ),
-        (
-            YouTubeChannel(),
-            "https://m.youtube.com/watch?v=abc",
-            "https://youtu.be:443/abc",
-        ),
-        (
-            RedditChannel(),
-            "https://old.reddit.com/r/python",
-            "https://reddit.com:443/r/python",
-        ),
-        (
-            LinkedInChannel(),
-            "https://www.linkedin.com/in/example",
-            "https://linkedin.com:443/in/example",
-        ),
-        (
-            V2EXChannel(),
-            "https://www.v2ex.com/t/1",
-            "https://v2ex.com:443/t/1",
-        ),
-        (
-            XiaoyuzhouChannel(),
-            "https://www.xiaoyuzhoufm.com/episode/1",
-            "https://xiaoyuzhoufm.com:443/episode/1",
-        ),
-        (
-            FacebookChannel(),
-            "https://m.facebook.com/groups/1",
-            "https://facebook.com:443/groups/1",
-        ),
-        (
-            InstagramChannel(),
-            "https://www.instagram.com/example",
-            "https://instagram.com:443/example",
-        ),
-    ],
-)
+_FIXED = [
+    (GitHubChannel(), "github.com", "https://api.github.com/repos/openai/openai-python"),
+    (YouTubeChannel(), "youtube.com", "https://m.youtube.com/watch?v=abc"),
+    (RedditChannel(), "reddit.com", "https://old.reddit.com/r/python"),
+    (HackerNewsChannel(), "news.ycombinator.com", "https://news.ycombinator.com/item?id=1"),
+    (StackOverflowChannel(), "stackoverflow.com", "https://www.stackoverflow.com/questions/1"),
+    (DevToChannel(), "dev.to", "https://www.dev.to/a/b"),
+    (BlueskyChannel(), "bsky.app", "https://www.bsky.app/profile/a.bsky.social"),
+    (MediumChannel(), "medium.com", "https://netflixtechblog.medium.com/post"),
+    (GeekNewsChannel(), "news.hada.io", "https://news.hada.io/topic?id=1"),
+]
+
+
+@pytest.mark.parametrize(("channel", "official_domain", "subdomain_url"), _FIXED)
 def test_fixed_domain_channels_accept_subdomains_and_explicit_ports(
-    channel, subdomain_url, port_url
+    channel, official_domain, subdomain_url
 ):
     assert channel.can_handle(subdomain_url)
-    assert channel.can_handle(port_url)
+    assert channel.can_handle(f"https://{official_domain}:443/path")
 
 
-@pytest.mark.parametrize(
-    ("channel", "official_domain"),
-    [
-        (GitHubChannel(), "github.com"),
-        (YouTubeChannel(), "youtube.com"),
-        (RedditChannel(), "reddit.com"),
-        (LinkedInChannel(), "linkedin.com"),
-        (V2EXChannel(), "v2ex.com"),
-        (XiaoyuzhouChannel(), "xiaoyuzhoufm.com"),
-        (FacebookChannel(), "facebook.com"),
-        (InstagramChannel(), "instagram.com"),
-    ],
-)
+@pytest.mark.parametrize(("channel", "official_domain", "subdomain_url"), _FIXED)
 def test_fixed_domain_channels_reject_suffix_lookalikes_and_userinfo(
-    channel, official_domain
+    channel, official_domain, subdomain_url
 ):
     assert not channel.can_handle(f"https://{official_domain}.evil.test/path")
     assert not channel.can_handle(f"https://{official_domain}@evil.test/path")

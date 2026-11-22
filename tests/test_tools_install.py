@@ -52,9 +52,9 @@ def test_pip_timeout_names_stage_and_redacts_proxy(monkeypatch):
 
     monkeypatch.setattr(tools.subprocess, "run", timeout)
     with pytest.raises(ReachError) as err:
-        tools._run(["python", "-m", "pip"], timeout=1, stage="cloakbrowser:pip_packages")
+        tools._run(["python", "-m", "pip"], timeout=1, stage="sample:pip_packages")
     assert err.value.code == TIMEOUT
-    assert "cloakbrowser:pip_packages" in err.value.message
+    assert "sample:pip_packages" in err.value.message
     assert "configured proxy" in err.value.hint
     assert "secret" not in str(err.value) + err.value.hint
 
@@ -64,14 +64,14 @@ def test_install_failure_scrubs_upstream_url_credentials(monkeypatch):
     monkeypatch.setattr(tools.subprocess, "run", lambda *a, **kw: SimpleNamespace(
         returncode=1, stdout="", stderr="Could not connect to https://user:secret@example.com/download?token=abc"))
     with pytest.raises(ReachError) as err:
-        tools._run(["pip", "install", "cloakbrowser"], stage="cloakbrowser:pip_packages")
+        tools._run(["pip", "install", "sample"], stage="sample:pip_packages")
     assert "secret" not in str(err.value)
     assert "token=abc" not in str(err.value)
     assert "direct network" in err.value.hint
 
 
 def test_rerunning_pip_setup_preserves_partial_environment(monkeypatch, tmp_path):
-    tool = tools.TOOLS["cloakbrowser"]
+    tool = tools.Tool("sample", "pip", "sample-package", ("sample",), tested="1.2.3")
     monkeypatch.setattr(tools, "tool_dir", lambda name: tmp_path / name)
     venv = tmp_path / tool.name / "venv"
     py = venv / ("Scripts/python.exe" if tools._WIN else "bin/python")
@@ -85,8 +85,13 @@ def test_rerunning_pip_setup_preserves_partial_environment(monkeypatch, tmp_path
     assert marker.read_text() == "keep"
     assert len(calls) == 1
     assert calls[0][0][:4] == [str(py), "-m", "pip", "install"]
-    assert calls[0][1]["stage"] == "cloakbrowser:pip_packages"
-    assert "cloakbrowser==0.6.3" in calls[0][0]
+    assert calls[0][1]["stage"] == "sample:pip_packages"
+    assert "sample-package==1.2.3" in calls[0][0]
+
+
+def test_no_remote_installer_script_or_anti_detect_browser_is_declared():
+    assert not {"uv", "cloakbrowser", "bili-cli", "boss-agent-cli"} & set(tools.TOOLS)
+    assert not hasattr(tools, "_install_uv")
 
 
 def test_opencli_uses_pristine_compatible_release_without_install_hooks(monkeypatch, tmp_path):

@@ -1,51 +1,37 @@
-# Security Policy
+# 보안 정책
 
-## Supported Versions
+## 취약점 신고
 
-| Version | Supported |
-|---------|-----------|
-| Latest  | ✅ Yes    |
+취약점을 발견하면 공개 이슈로 등록하지 말고 GitHub의 비공개 보안 권고 기능으로 알려 주십시오.
 
-## Reporting a Vulnerability
+**[취약점 신고하기](https://github.com/TaxD/Agent-Reach/security/advisories/new)**
 
-If you discover a security vulnerability in Agent-Reach, please report 
-it responsibly by using GitHub's private security advisory feature:
+신고에는 취약점 설명, 재현 절차, 영향받는 버전, 예상되는 영향, (가능하면) 수정 제안을 포함해 주십시오.
 
-👉 **[Report a vulnerability](https://github.com/Panniantong/Agent-Reach/security/advisories/new)**
+## 신뢰 경계
 
-Please do NOT open a public GitHub issue for security vulnerabilities.
+| 대상 | 신뢰 수준 | 처리 방식 |
+|---|---|---|
+| 사용자 | 신뢰함 | 로그인, 키 입력, 쿠키 가져오기는 사용자의 명시적인 명령으로만 수행 |
+| 에이전트가 넘기는 인자(검색어, 주소, id) | 신뢰하지 않음 | 형식 검증 후 URL 인코딩. 셸을 거치지 않고 인자 배열로만 하위 프로세스 실행 |
+| 플랫폼이 반환한 콘텐츠 | 신뢰하지 않음 | 데이터로만 전달. 실행·렌더링하지 않으며, 스킬 문서가 에이전트에게 콘텐츠 안의 지시를 따르지 말라고 명시 |
+| 상위 도구(OpenCLI, yt-dlp, ffmpeg, Node) | 버전 고정 후 사용 | OpenCLI·yt-dlp는 버전 고정, 확장 프로그램은 SHA-256 검증, Node는 공식 SHASUMS 검증 |
 
-## What to Include
+## 이 포크에서 강화한 사항
 
-- Description of the vulnerability
-- Steps to reproduce
-- Affected versions
-- Potential impact
-- Suggested fix (if any)
+- **탐지 회피 브라우저 제거**: 제3자가 패치한 Chromium 바이너리(CloakBrowser)를 내려받아서 로그인 세션을 맡기던 동작을 없애고, 설치되어 있는 Google Chrome만 사용합니다.
+- **암묵적 쿠키 복사 제거**: 일반 조회가 사용자의 다른 브라우저에서 사이트 쿠키를 자동으로 복사하던 동작을 없앴습니다. `login <채널> --import-existing`으로 명시적으로 요청한 경우에만 복사합니다.
+- **브라우저 확장 프로그램 고정**: "최신 릴리스"를 검증 없이 내려받던 동작을, 고정된 릴리스 파일을 SHA-256으로 검증한 뒤 설치하도록 바꿨습니다. 압축 파일 안의 심볼릭 링크와 경로 탈출은 거부합니다.
+- **검증되지 않은 원격 스크립트 실행 제거**: uv 설치 스크립트를 내려받아 실행하던 경로와, 해시가 고정되지 않은 GitHub 압축 파일에서 CLI를 설치하던 경로를 제거했습니다.
+- **SSRF 방지**: 임의의 주소를 받는 `rss fetch`는 http/https와 포트 80/443만 허용하고, 실제로 접속하는 IP가 공인 주소인지 접속 시점에 확인하며(DNS 리바인딩 방지), 리디렉션마다 다시 검증합니다.
+- **XML 공격 방지**: 피드에 DTD나 엔티티 선언이 있으면 거부합니다. 응답 크기와 gzip 해제 크기에 상한이 있습니다.
+- **고정 호스트**: 나머지 신규 채널은 코드에 고정된 HTTPS 호스트에만 요청하며, 호출자가 넘긴 값은 경로·쿼리로만 인코딩됩니다.
+- **출력량 제한**: 피드 항목의 본문과 댓글 수에 상한을 두어, 한 번의 호출이 에이전트의 컨텍스트를 채우지 못하게 했습니다.
 
-## Response Timeline
+## 알려진 한계
 
-- Acknowledgement within **48 hours**
-- Status update within **7 days**
-- Fix timeline communicated within **14 days**
-
-## Scope
-
-The following are considered in scope:
-- Authentication and authorization bypass
-- Remote code execution
-- Path traversal / arbitrary file read
-- Server-Side Request Forgery (SSRF)
-- Injection vulnerabilities (SQL, command, prompt)
-- Sensitive data exposure
-
-## Out of Scope
-
-- Vulnerabilities in dependencies (report to the dependency maintainer)
-- Social engineering attacks
-- Denial of service via resource exhaustion
-
-## Credits
-
-We appreciate responsible disclosure and will credit researchers 
-in our release notes unless anonymity is requested.
+- 전용 브라우저는 `127.0.0.1`의 디버깅 포트를 엽니다. 같은 컴퓨터에서 같은 사용자 권한으로 실행되는 다른 프로그램은 이 포트로 전용 프로필의 세션에 접근할 수 있습니다. 전용 프로필에는 조회에 필요한 계정만 로그인하고, 민감한 계정은 로그인하지 마십시오.
+- `reddit`과 `twitter`의 브라우저 경로는 제3자 도구인 OpenCLI와 그 확장 프로그램에 의존합니다. 버전과 해시를 고정했지만, 해당 도구의 코드 전체를 감사한 것은 아닙니다.
+- `web` 채널과 웹 검색 경유 동작은 검색어와 주소를 Exa·Jina에 전달하고, `youtube transcribe`는 음성을 Groq·OpenAI에 전달합니다.
+- 프롬프트 인젝션은 이 도구만으로 막을 수 없습니다. 가져온 콘텐츠를 데이터로 취급하는 것은 에이전트의 책임이며, 스킬 문서가 이를 지시합니다.
+- 자격 증명(`~/.agent-reach/config.yaml`, 전용 프로필의 세션)은 파일 권한(0600/0700)으로만 보호되며 암호화되지 않습니다.

@@ -26,7 +26,9 @@ def _reddit(args, timeout: float) -> list:
 
 class RedditChannel(Channel):
     name = "reddit"
-    description = "Reddit 帖子和评论"
+    description = "Reddit 글과 댓글"
+    purpose = ("특정 주제에 대한 일반 사용자와 실무자의 솔직한 경험담·추천·비교·불만을 찾을 때 사용합니다. "
+               "서브레딧 단위로 커뮤니티 분위기를 볼 수 있으며, 공개 웹 경로를 먼저 시도하고 필요할 때에만 로그인을 요청합니다.")
 
     level = "optional"
     login_url = "https://www.reddit.com/login/"
@@ -41,10 +43,10 @@ class RedditChannel(Channel):
     actions = (
         Action(
             "search",
-            "Search public posts first; --backend opencli uses site search",
+            "공개 글을 먼저 검색. --backend opencli는 사이트 내부 검색 사용",
             (
-                Param("query", "what to search for"),
-                Param("limit", "max results", required=False, type=int, default=5),
+                Param("query", "검색어"),
+                Param("limit", "최대 결과 수", required=False, type=int, default=5),
             ),
             (("opencli", "_opencli_search"),),
             live_test={"query": "python", "limit": 2},
@@ -52,17 +54,17 @@ class RedditChannel(Channel):
         ),
         Action(
             "read",
-            "Read public page text first; --backend opencli requests the post and top comments",
-            (Param("target", "post link or id"),),
+            "공개 페이지 본문을 먼저 읽기. --backend opencli는 글과 상위 댓글을 요청",
+            (Param("target", "글 링크 또는 id"),),
             (("opencli", "_opencli_read"),),
             public_web=("reddit.com/r/", "redd.it/"),
         ),
         Action(
             "subreddit",
-            "Latest posts in a subreddit",
+            "서브레딧의 최신 글",
             (
-                Param("name", "subreddit name without r/, e.g. python"),
-                Param("limit", "max posts", required=False, type=int, default=5),
+                Param("name", "r/ 를 뺀 서브레딧 이름 (예: python)"),
+                Param("limit", "최대 글 수", required=False, type=int, default=5),
             ),
             (("opencli", "_opencli_subreddit"),),
             live_test={"name": "python", "limit": 2},

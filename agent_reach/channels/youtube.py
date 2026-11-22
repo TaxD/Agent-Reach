@@ -111,7 +111,9 @@ def vtt_to_text(vtt: str) -> str:
 
 class YouTubeChannel(Channel):
     name = "youtube"
-    description = "YouTube 视频和字幕"
+    description = "YouTube 영상 정보와 자막"
+    purpose = ("강연·튜토리얼·발표·인터뷰 영상을 찾고, 영상을 재생하지 않고도 자막 전문으로 내용을 파악할 때 사용합니다. "
+               "영상 요약이 필요하면 subtitle을 먼저 시도하고, 자막이 없을 때에만 사용자 동의하에 transcribe를 사용합니다.")
 
     level = "default"
     #: transcribe re-encodes and chunks audio
@@ -119,35 +121,35 @@ class YouTubeChannel(Channel):
     actions = (
         Action(
             "read",
-            "Video title, channel, date and description",
-            (Param("target", "video link or id"),),
+            "영상 제목·채널·날짜·설명",
+            (Param("target", "영상 링크 또는 id"),),
             (("yt-dlp", "_ytdlp_read"),),
             live_test={"target": "https://www.youtube.com/watch?v=jNQXAC9IVRw"},
         ),
         Action(
             "search",
-            "Search videos",
+            "영상 검색",
             (
-                Param("query", "what to search for"),
-                Param("limit", "max results", required=False, type=int, default=5),
+                Param("query", "검색어"),
+                Param("limit", "최대 결과 수", required=False, type=int, default=5),
             ),
             (("yt-dlp", "_ytdlp_search"),),
             live_test={"query": "python tutorial", "limit": 2},
         ),
         Action(
             "subtitle",
-            "Full subtitle text of a video (manual or auto captions)",
+            "영상의 자막 전문 (수동 자막 또는 자동 생성 자막)",
             (
-                Param("target", "video link or id"),
-                Param("lang", "preferred languages, comma separated", required=False, default="zh-Hans,zh,en,en-orig"),
+                Param("target", "영상 링크 또는 id"),
+                Param("lang", "선호 언어, 쉼표로 구분", required=False, default="ko,en,en-orig"),
             ),
             (("yt-dlp", "_ytdlp_subtitle"),),
             live_test={"target": "https://www.youtube.com/watch?v=jNQXAC9IVRw"},
         ),
         Action(
             "transcribe",
-            "Speech-to-text of a video's audio (uses Groq/OpenAI Whisper quota)",
-            (Param("target", "video link or id"),),
+            "영상 음성을 텍스트로 전사 (음성이 Groq/OpenAI Whisper API로 전송되며 사용량이 차감됨)",
+            (Param("target", "영상 링크 또는 id"),),
             (("whisper", "_whisper_transcribe"),),
             timeout=1800,
         ),

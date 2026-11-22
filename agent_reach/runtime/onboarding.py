@@ -1,79 +1,37 @@
-"""Read-only session discovery and explicit connection choices. Never logs a user in."""
-import json
-import urllib.request
+"""Install receipt and capability summary. No I/O: management passes in the status records."""
 from datetime import datetime
-from urllib.parse import urlsplit
 
-from agent_reach.utils.url import host_matches
-
-from .result import BAD_INPUT, ReachError
-
-# These describe public routes an agent can try, not authenticated Reach readiness.
-# A successful sample depends on the tool, network exit, content and platform response.
-_PUBLIC_ACCESS = {
-    'web': '先用 Agent 已有网页搜索和读取；只为剩余缺口调用 Reach。',
-    'github': '公开仓库、README、Issue/PR 及公开评论可先用网页或公开接口。',
-    'youtube': '公开搜索、简介可先读；原生工具的部分样本可取评论、字幕和时间戳。',
-    'bilibili': '公开搜索、简介、统计可先读；部分公开接口可取评论及回复关系。',
-    'xiaoyuzhou': '播客转录需要 Groq Key；安装不要求登录。',
-    'v2ex': '公开主题正文和部分回复可先读；完整性、分页需要单独核对。',
-    'reddit': '公开搜索、正文和部分评论可先读；部分公开 JSON 样本可含评论及 parent_id。',
-    'twitter': '公开搜索摘要、部分单帖全文可先尝试；公开嵌入不提供评论流。',
-    'xiaohongshu': '公开发现页可能提供笔记 ID 和作者；不据此认定正文、评论可读。',
-    'instagram': '公开搜索或主页信息可先尝试；HTML 可能只有应用外壳，Caption 和评论未获统一验证。',
-    'facebook': '公开搜索摘要可先尝试；帖子正文和评论取决于页面与访问路径。',
-    'linkedin': '公开职位可先搜索、读详情；2026-10-21 已取得免登录职位样本，不保证所有职位可读。',
-    'boss': '公开职位索引和页面可先尝试；本轮未做匿名粒度验收。',
-    'xueqiu': '公开股票行情和名称搜索可先尝试；社区内容另按所选路径判断。',
+# What is declared as needing the user's own login before it can work.
+_LOGIN_NOTE = {
+    'reddit': '서브레딧 최신 글, 사이트 내부 검색',
+    'twitter': '트윗 검색, 타임라인, 답글 스레드',
 }
 
 _CAPABILITY_LIMITS = {
-    'youtube': ['read 返回元信息和简介；没有独立 comments 动作。',
-                '字幕依赖可用轨道；转录还需配置服务及额度，登录不保证有字幕。'],
-    'bilibili': ['read 返回元信息和简介；没有独立 comments 动作。',
-                 'subtitle 当前读取首P已有字幕；可能要求登录，不代表整套多P视频。'],
-    'reddit': ['read 仅承诺其返回的帖子和评论；不保证完整评论树，不提供发评论动作。'],
-    'twitter': ['thread 仅覆盖实际返回的回复；不保证完整评论流，不提供发帖动作。'],
-    'xiaohongshu': ['只报告实际读取的正文、已加载评论和回复，不承诺完整导出。'],
-    'instagram': ['search 搜索用户；没有任意帖子 read 或独立 comments 动作。'],
-    'facebook': ['当前仅声明 search/profile，不承诺独立帖文读取或评论导出。'],
-    'linkedin': ['当前仅声明职位搜索和 JD 读取，不承诺联系人或动态抓取。'],
-    'boss': ['当前仅声明职位搜索和 JD 读取；登录不保证平台始终允许访问。'],
-    'v2ex': ['回复是否完整须核对分页与实际返回数量。'],
-}
-
-
-# Public web options and authenticated Reach actions; detailed limits stay in capability_summary.
-_QUICK_ACCESS = {
-    'xiaoyuzhou': ('🔑 转录需 Key', '—'),
-    'github': ('✅ 找项目、读文档、看讨论、看评论', '—'),
-    'youtube': ('✅ 找视频、读简介、读字幕', '—'),
-    'bilibili': ('✅ 找视频、读简介', '❌ 读字幕'),
-    'v2ex': ('✅ 读帖子、看回复', '—'),
-    'web': ('✅ 搜资料、读网页', '—'),
-    'reddit': ('✅ 搜帖子、读正文、看评论', '—'),
-    'twitter': ('✅ 搜摘要、试读原文', '❌ 搜推文、看动态、看回复'),
-    'xiaohongshu': ('✅ 搜摘要、找链接', '❌ 站内搜、读正文、看评论'),
-    'instagram': ('✅ 搜简介', '❌ 找用户、看主页、看帖子'),
-    'facebook': ('✅ 搜摘要', '❌ 站内搜、看主页'),
-    'linkedin': ('✅ 找职位、读公开详情', '❌ 站内搜'),
-    'boss': ('✅ 搜标题、找链接', '❌ 站内搜、读详情'),
-    'xueqiu': ('✅ 找股票、查行情', '❌ 看热帖、看热股'),
+    'youtube': ['read는 메타 정보와 설명만 반환합니다. 독립된 comments 동작은 없습니다.',
+                '자막은 영상에 자막 트랙이 있어야 하며, 전사는 별도로 API 키와 사용량이 필요합니다.'],
+    'reddit': ['read는 실제로 반환된 글과 댓글만 보장합니다. 전체 댓글 트리를 보장하지 않으며 글쓰기 동작은 없습니다.'],
+    'twitter': ['thread는 실제로 반환된 답글만 포함합니다. 전체 답글을 보장하지 않으며 게시 동작은 없습니다.'],
+    'github-trending': ['공식 API가 없어서 트렌딩 페이지의 HTML을 해석합니다. 페이지 구조가 바뀌면 일시적으로 실패할 수 있습니다.'],
+    'dribbble': ['공개 API가 없어서 웹 검색과 페이지 읽기로만 접근합니다. 이미지 자체는 반환하지 않습니다.'],
+    'producthunt': ['공개 피드에 실린 최신 제품만 제공합니다. 득표 수와 검색은 제공하지 않습니다.'],
+    'medium': ['피드는 최근 글 약 10개만 제공하며, 유료 글은 본문 일부만 읽힐 수 있습니다.'],
+    'rss': ['공개 인터넷 주소의 피드만 읽습니다. 사설망·로컬 주소는 차단됩니다.'],
 }
 
 _DISPLAY_NAMES = {
-    'xiaoyuzhou': '小宇宙',
-    'github': 'GitHub', 'youtube': 'YouTube', 'bilibili': 'B站', 'v2ex': 'V2EX',
-    'web': '网页', 'reddit': 'Reddit', 'twitter': 'X / Twitter', 'facebook': 'Facebook',
-    'instagram': 'Instagram', 'xiaohongshu': '小红书', 'linkedin': 'LinkedIn',
-    'boss': 'BOSS直聘', 'xueqiu': '雪球',
+    'github': 'GitHub', 'github-trending': 'GitHub Trending', 'youtube': 'YouTube', 'web': '웹',
+    'reddit': 'Reddit', 'twitter': 'X / Twitter', 'hackernews': 'Hacker News',
+    'stackoverflow': 'Stack Overflow', 'lobsters': 'Lobsters', 'devto': 'dev.to', 'mdn': 'MDN',
+    'npm': 'npm', 'producthunt': 'Product Hunt', 'medium': 'Medium', 'dribbble': 'Dribbble',
+    'bluesky': 'Bluesky', 'rss': 'RSS/피드', 'geeknews': 'GeekNews', 'yozm': '요즘IT',
 }
 
 _STATUS_LABELS = {
-    'not_added': '未接入，可按需添加', 'needs_setup': '待配置', 'unverified': '已接入，待实测',
-    'ready': '已有有效验收', 'search_ready': '仅搜索已有验收',
-    'needs_login': '所测动作要求登录', 'cooldown': '暂缓访问',
-    'needs_user_action': '等待人工验证', 'broken': '当前路径故障',
+    'not_added': '미연결(필요할 때 추가)', 'needs_setup': '설정 필요', 'unverified': '연결됨(실측 전)',
+    'ready': '실측 통과', 'search_ready': '검색만 실측 통과',
+    'needs_login': '로그인 필요', 'cooldown': '일시 중지(요청 제한)',
+    'needs_user_action': '사용자 인증 대기', 'broken': '현재 경로 장애',
 }
 
 
@@ -81,36 +39,10 @@ def _local_greeting():
     """Use the installing computer's clock and timezone, without a network lookup."""
     hour = datetime.now().hour
     if 5 <= hour < 11:
-        return '早上好呀，想搜点什么？☀️'
-    if 11 <= hour < 14:
-        return '中午好，想搜点什么？'
-    if 14 <= hour < 18:
-        return '下午好，想搜点什么？'
-    if 18 <= hour < 22:
-        return '晚上好，想搜点什么？'
-    return '夜深了，想搜点什么？🌙'
-
-def _upgrade_lines(result):
-    """Only for users coming from 1.5: what was kept, what changed, what is left to do."""
-    migration = result.get('migration')
-    if not migration:
-        return []
-    lines = ['**这次是从旧版本（1.5）升级上来的：**', '',
-             '- 你的密钥和设置都保留了。',
-             '- RSS 订阅和 Exa 全网搜索不再单独提供，搜资料、读网页统一用"网页"。',
-             '- 推特、小红书这类要登录的平台，现在用 Agent Reach 自己的专用浏览器；第一次用时会先尝试复用你 Chrome 里的登录。',
-             '- 你以前另外装的命令行工具（比如 twitter-cli、bili）原样保留，没有删。']
-    suggested = [_DISPLAY_NAMES.get(n, n) for n in migration.get('suggested_channels') or []]
-    if suggested:
-        lines.append('- 你以前用过' + '、'.join(suggested) + '，想继续用直接跟我说"加上 XX"。')
-    old = result.get('old_copies') or {}
-    if old.get('removed'):
-        lines.append('- 旧版程序已经删掉，以后不会和新版冲突。')
-    for item in old.get('failed') or []:
-        from .legacy import manual_command
-        lines.append(f"- 旧版程序没删成，请运行：`{manual_command(item)}`")
-    return lines + ['']
-
+        return '좋은 아침입니다. 무엇을 찾아드릴까요?'
+    if 11 <= hour < 18:
+        return '안녕하세요. 무엇을 찾아드릴까요?'
+    return '좋은 저녁입니다. 무엇을 찾아드릴까요?'
 
 
 def installation_report(result):
@@ -124,11 +56,9 @@ def installation_report(result):
     completed = all(row['ok'] for row in installs.values())
     lines = [
         _local_greeting(), '',
-        f"**Agent Reach {result['version']} {'安装完成' if completed else '安装还差一步'}。** "
-        f'默认功能：{installed}/{len(installs)} 项准备成功。', '',
-        *_upgrade_lines(result),
-        '✅ 不用登录；❌ 登录后再试；🔑 需 Key；— 不用额外登录。', '',
-        '| 平台 | 不登录可以查什么 | 需要登录后再试 |', '|---|---|---|',
+        f"**Agent Reach {result['version']} {'설치가 완료되었습니다' if completed else '설치가 아직 끝나지 않았습니다'}.** "
+        f'기본 채널 {len(installs)}개 중 {installed}개가 준비되었습니다.', '',
+        '| 플랫폼 | 용도 | 로그인이 필요한 기능 |', '|---|---|---|',
     ]
     for entry in sorted(entries, key=lambda item: item['level'] != 'default'):
         name = entry['channel']
@@ -136,24 +66,22 @@ def installation_report(result):
         item = installs.get(name)
         if entry['level'] == 'default':
             if item and not item['ok']:
-                label += '（安装失败：' + item.get('error', {}).get('code', 'UNKNOWN') + '）'
+                label += ' (설치 실패: ' + item.get('error', {}).get('code', 'UNKNOWN') + ')'
             elif not item:
-                label += '（保留用户移除）'
+                label += ' (사용자가 제거함)'
         elif entry['reach_status'] in {'needs_setup', 'needs_login', 'cooldown', 'needs_user_action', 'broken'}:
-            label += '（' + _STATUS_LABELS[entry['reach_status']] + '）'
-        public, login = _QUICK_ACCESS.get(name, (entry['public_access'], '—'))
-        lines.append('| ' + ' | '.join(cell(value) for value in (label, public, login)) + ' |')
+            label += ' (' + _STATUS_LABELS[entry['reach_status']] + ')'
+        lines.append('| ' + ' | '.join(cell(value) for value in (
+            label, entry['purpose'], _LOGIN_NOTE.get(name, '—'))) + ' |')
     verified = [entry for entry in entries if entry['verified_actions']]
     if verified:
-        names = '；'.join(_DISPLAY_NAMES.get(entry['channel'], entry['channel']) + '：' +
-                         '/'.join(entry['verified_actions']) for entry in verified)
-        lines += ['', '已测通过：' + names + '。其余还没逐项联网测试。']
+        names = '; '.join(_DISPLAY_NAMES.get(entry['channel'], entry['channel']) + ': ' +
+                          '/'.join(entry['verified_actions']) for entry in verified)
+        lines += ['', '실측 통과: ' + names + '. 나머지는 아직 항목별로 실측하지 않았습니다.']
     else:
-        lines += ['', '还没逐项联网测试。']
-    lines += ['摘要、标题和链接先从搜索引擎找；评论以已读内容为准，字幕需视频自带。', '',
-              '**想查什么，直接说。** 会先尝试复用已有登录；确实需要你登录时，再打开窗口。']
+        lines += ['', '아직 항목별 실측은 하지 않았습니다.']
+    lines += ['', '**찾고 싶은 것을 바로 말씀해 주십시오.** 로그인이 꼭 필요한 경우에만 전용 브라우저 창을 엽니다.']
     return '\n'.join(lines) + '\n'
-
 
 
 def capability_summary(channels, statuses):
@@ -168,72 +96,31 @@ def capability_summary(channels, statuses):
         current = by_name.get(ch.name, {})
         names = [action.name for action in ch.actions]
         can_login = bool(ch.login_url or ch.login_argv)
-        auth_actions = {'bilibili': ['subtitle'], 'xueqiu': ['hot_posts', 'hot_stocks']}.get(
-            ch.name, names if can_login else [])
+        auth_actions = names if can_login else []
         entries.append({
             'channel': ch.name,
             'level': ch.level,
             'reach_status': current.get('status', 'unverified'),
             'verified_actions': current.get('verified_actions', []),
             'actions': [{'action': action.name, 'detail': action.help} for action in ch.actions],
-            'public_access': _PUBLIC_ACCESS.get(ch.name, '先尝试 Agent 已有公开搜索和读取。'),
+            'purpose': ch.purpose,
+            'public_access': '로그인 없이 사용합니다.' if not can_login else '공개 웹 경로를 먼저 시도하고, 남은 작업에 꼭 필요할 때만 로그인을 요청합니다.',
             'authentication': {
                 'when': 'only_if_required',
                 'may_enable_actions': [name for name in auth_actions if name in names],
-                'note': '剩余任务的选定路径实际要求认证时，先复用已授权会话，再请用户登录；登录后仍需验证动作。',
+                'note': '선택한 경로가 실제로 인증을 요구할 때에만 사용자에게 전용 브라우저에서 직접 로그인하도록 요청합니다. 로그인 후에도 동작을 다시 검증해야 합니다.',
             },
             'limits': _CAPABILITY_LIMITS.get(ch.name, []),
         })
-    message = ['先使用 Agent 已有公开搜索和读取；Reach 按需补充能力，安装不要求逐个平台登录。']
+    message = ['에이전트가 이미 가진 공개 검색·읽기 도구를 먼저 사용하고, Reach는 부족한 부분만 보완합니다. 설치할 때 플랫폼별 로그인은 요구하지 않습니다.']
     for entry in entries:
         actions = '/'.join(action['action'] for action in entry['actions'])
         status_label = _STATUS_LABELS.get(entry['reach_status'], entry['reach_status'])
         limits = ' '.join(entry['limits'])
-        message.append(f"{entry['channel']}：{entry['public_access']} Reach {actions}（{status_label}）。{limits}")
+        message.append(f"{entry['channel']}: {entry['purpose']} 동작 {actions} ({status_label}). {limits}".rstrip())
     return {
         'policy': 'public_first; login_only_for_remaining_task_when_required',
-        'evidence_note': '公开路径说明来自样本与访问条件，不能代替本机 Reach 验收；网络、403、超时或验证码均不能单独证明需要登录。',
+        'evidence_note': '용도 설명은 선언된 기능이며, 이 컴퓨터에서 실측한 결과를 대신하지 않습니다. 네트워크 오류, 403, 시간 초과, 캡차만으로는 로그인이 필요하다고 단정할 수 없습니다.',
         'channels': entries,
         'message': '\n'.join(message),
     }
-
-
-def cdp_url():
-    from .browser import CDP_URL
-    return validate_cdp(CDP_URL)
-
-
-def validate_cdp(value):
-    try:
-        u = urlsplit(value)
-        valid = (u.scheme == 'http' and u.hostname in {'localhost', '127.0.0.1', '::1'}
-                 and u.port and not u.username and not u.password and not u.query
-                 and not u.fragment and u.path in ('', '/'))
-    except (TypeError, ValueError):
-        valid = False
-    if not valid:
-        raise ReachError(BAD_INPUT, 'CDP must be a loopback HTTP address with an explicit port')
-    return value.rstrip('/')
-
-
-def cdp_status():
-    url = cdp_url()
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        with opener.open(url + '/json/list', timeout=2) as resp:
-            tabs = json.loads(resp.read(1024 * 1024))
-        found = isinstance(tabs, list) and any(
-            isinstance(t, dict) and t.get('type') == 'page'
-            and host_matches(t.get('url', ''), 'zhipin.com') for t in tabs)
-        return {'endpoint': url, 'connected': isinstance(tabs, list), 'boss_tab_present': bool(found)}
-    except (OSError, ValueError):
-        return {'endpoint': url, 'connected': False, 'boss_tab_present': False}
-
-
-def require_boss_cdp():
-    from . import browser, session_reuse
-    session_reuse.prepare("boss")
-    if not cdp_status()['boss_tab_present']:
-        browser.open_url('https://www.zhipin.com/web/geek/jobs')
-    browser.touch()
-    return browser.CDP_URL

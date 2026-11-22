@@ -21,7 +21,9 @@ def _x(args, timeout: float) -> list:
 
 class TwitterChannel(Channel):
     name = "twitter"
-    description = "Twitter/X 推文"
+    description = "X(Twitter) 트윗"
+    purpose = ("특정 인물·회사·프로젝트의 공식 발표와 실시간 반응을 확인할 때 사용합니다. 사용자가 전용 브라우저에서 직접 "
+               "로그인해야 동작하는 실험적 채널이므로, 로그인 없이 가능한 bluesky·웹 검색으로 충분한지 먼저 판단합니다.")
 
     # twitter-cli is not used here: even with explicit credentials it re-reads
     # browser cookies whenever verification fails.
@@ -38,10 +40,10 @@ class TwitterChannel(Channel):
     actions = (
         Action(
             "search",
-            "Search tweets",
+            "트윗 검색",
             (
-                Param("query", "what to search for"),
-                Param("limit", "max results", required=False, type=int, default=5),
+                Param("query", "검색어"),
+                Param("limit", "최대 결과 수", required=False, type=int, default=5),
             ),
             (("opencli", "_opencli_search"),),
             live_test={"query": "openai", "limit": 2},
@@ -49,24 +51,24 @@ class TwitterChannel(Channel):
         ),
         Action(
             "profile",
-            "A user's profile",
-            (Param("username", "handle without @"),),
+            "사용자 프로필",
+            (Param("username", "@ 를 뺀 핸들"),),
             (("opencli", "_opencli_profile"),),
             live_test={"username": "OpenAI"},
         ),
         Action(
             "tweets",
-            "A user's recent tweets",
+            "사용자의 최근 트윗",
             (
-                Param("username", "handle without @"),
-                Param("limit", "max tweets", required=False, type=int, default=5),
+                Param("username", "@ 를 뺀 핸들"),
+                Param("limit", "최대 트윗 수", required=False, type=int, default=5),
             ),
             (("opencli", "_opencli_tweets"),),
         ),
         Action(
             "thread",
-            "A tweet with its replies",
-            (Param("target", "tweet id or link"),),
+            "트윗 하나와 답글",
+            (Param("target", "트윗 id 또는 링크"),),
             (("opencli", "_opencli_thread"),),
         ),
     )

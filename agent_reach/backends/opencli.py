@@ -44,11 +44,11 @@ def _opencli_error(text: str, login_hint: str):
     message = str(err.get("message", "") or text.strip() or "OpenCLI failed")[:500]
     upstream_hint = str(err.get("help") or err.get("hint") or "").strip() or None
     low = message.lower()
-    if any(w in low for w in ("环境异常", "环境存在异常", "browser environment", "captcha", "验证码", "安全验证", "account_risk")) or code in {"ACCOUNT_RISK", "CAPTCHA_REQUIRED"}:
+    if any(w in low for w in ("browser environment", "captcha", "account_risk")) or code in {"ACCOUNT_RISK", "CAPTCHA_REQUIRED"}:
         return ReachError(PLATFORM_BLOCKED, message, hint=upstream_hint)
-    if code in {"RATE_LIMITED", "RATE_LIMIT"} or any(w in low for w in ("http 429", "too many requests", "访问过于频繁")):
+    if code in {"RATE_LIMITED", "RATE_LIMIT"} or any(w in low for w in ("http 429", "too many requests")):
         return ReachError(RATE_LIMITED, message)
-    login_words = ("login", "log in", "logged in", "sign in", "http 401", "登录")
+    login_words = ("login", "log in", "logged in", "sign in", "http 401")
     if not re.search(r"\bHTTP 404\b", message, re.I) and (
             "AUTH" in code or "LOGIN" in code or any(w in low for w in login_words)):
         # Upstream would send the user to their own Chrome; Reach logs in in its own browser.
@@ -61,6 +61,11 @@ def opencli_call(site: str, args, *, timeout: float, login_hint: str = ""):
     from agent_reach.runtime.browser_binding import environment
     from agent_reach.runtime.run import CommandFailed, run_cmd
 
+    # Caller-supplied values are positional. One that looks like an option could switch
+    # OpenCLI into another mode, so refuse it before the browser is even prepared.
+    if any(str(a).startswith("-") and a != "--limit" for a in args):
+        from agent_reach.runtime.result import BAD_INPUT, ReachError
+        raise ReachError(BAD_INPUT, "arguments must not start with '-'")
     env = environment(site)
     argv = ["opencli", site, *args, "-f", "json"]
     try:

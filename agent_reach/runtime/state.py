@@ -2,10 +2,10 @@
 
     {
       "version": 1,
-      "channels": {"bilibili": {"added_at": "..."}},
+      "channels": {"reddit": {"added_at": "..."}},
       "removed_defaults": ["youtube"],
-      "tools": {"bili-cli": {"owner": "agent-reach" | "user", "scope": "private" | "global", "version": "0.6.2"}},
-      "checks": {"bilibili": {"at": "...", "actions": {"search": true}, "previous": {"search": true}}},
+      "tools": {"opencli": {"owner": "agent-reach" | "user", "scope": "private" | "global", "version": "2.0.3"}},
+      "checks": {"reddit": {"at": "...", "actions": {"search": true}, "previous": {"search": true}}},
       "skill": {"links": [{"agent": "claude-code", "path": "...", "kind": "link" | "copy"}], "unlinked": ["/home/u/.cursor/skills"]}
     }
 

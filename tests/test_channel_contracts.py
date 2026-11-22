@@ -9,11 +9,12 @@ def test_channel_registry_contract():
     assert channels, "channel registry must not be empty"
     names = [ch.name for ch in channels]
     assert len(names) == len(set(names)), "channel names must be unique"
-    assert "xiaoyuzhou" in names
+    assert "hackernews" in names
 
     for ch in channels:
         assert isinstance(ch.name, str) and ch.name
         assert isinstance(ch.description, str) and ch.description
+        assert isinstance(ch.purpose, str) and ch.purpose
         assert ch.level in {"default", "optional", "experimental"}
         assert ch.actions, f"{ch.name} exposes no actions"
         for action in ch.actions:
@@ -27,12 +28,8 @@ def test_channel_can_handle_contract():
         "twitter": "https://x.com/user/status/1",
         "youtube": "https://youtube.com/watch?v=abc",
         "reddit": "https://reddit.com/r/python",
-        "facebook": "https://www.facebook.com/zuck",
-        "instagram": "https://www.instagram.com/openai/",
-        "bilibili": "https://www.bilibili.com/video/BV1xx411",
-        "xiaohongshu": "https://www.xiaohongshu.com/explore/123",
-        "linkedin": "https://www.linkedin.com/in/test",
-        "xueqiu": "https://xueqiu.com/S/SH600519",
+        "hackernews": "https://news.ycombinator.com/item?id=1",
+        "bluesky": "https://bsky.app/profile/bsky.app",
         "web": "https://example.com",
     }
     for ch in get_all_channels():

@@ -45,28 +45,29 @@ _MANAGEMENT = (
 #: Budget for rebuilding a session after a native login exited 0 with no credential.
 _RECOVER_TIMEOUT = 30.0
 
-HELP = """agent-reach — internet access for AI agents (all output is JSON)
+HELP = """agent-reach — AI 에이전트를 위한 인터넷 접근 도구 (모든 출력은 JSON)
 
-For agents:
-  agent-reach channels                    list channels, actions, params
-  agent-reach <channel> <action> [args]   e.g. agent-reach bilibili search python
-  agent-reach read <url>                  read a link with the matching channel
-  Search/read try declared public web routes first; --backend selects a site tool
-  --backend public-web                  public access only; no browser fallback
+에이전트용:
+  agent-reach channels                    채널, 용도(purpose), 동작, 인자 목록
+  agent-reach <channel> <action> [args]   예: agent-reach hackernews search rust
+  agent-reach read <url>                  링크에 맞는 채널을 골라서 읽기
+  검색/읽기는 선언된 공개 웹 경로를 먼저 시도합니다. --backend로 사이트 도구를 지정합니다.
+  --backend public-web                    공개 접근만 사용 (브라우저로 넘어가지 않음)
 
-For the user:
-  agent-reach setup [--text]              install defaults and skill; --text displays the capability tables
-  agent-reach add <channel>               install channel dependencies and prepare its browser
-  agent-reach remove <channel>            remove a channel (defaults too) and what only it used
-  agent-reach login|logout <channel>      log in (the user does it) / forget the login
-  agent-reach browser setup|status|stop   headless shared browser; login opens a window
-  agent-reach browser profiles|use ID    choose an existing local login source
-  agent-reach skill [link|unlink <dir>]   where the agent skill is; link it for another AI, or unlink one for good
-  agent-reach doctor [--text]             status of every channel and installed tool versions (no network)
-  agent-reach check [channel] [--text]    live-test channels; --search tests search/jobs only
-  agent-reach update [--check]            upgrade Agent Reach, every added channel's tools and the skill
+사용자용:
+  agent-reach setup [--text]              기본 채널과 스킬 설치. --text는 기능 표를 출력
+  agent-reach add <channel>               채널이 필요로 하는 도구 설치와 브라우저 준비
+  agent-reach remove <channel>            채널과 그 채널만 사용하던 도구 제거
+  agent-reach login|logout <channel>      로그인(사용자가 직접 수행) / 로그인 정보 삭제
+  agent-reach login <channel> --import-existing   다른 브라우저의 해당 사이트 로그인을 명시적으로 가져오기
+  agent-reach browser setup|status|stop   헤드리스 전용 브라우저. 로그인할 때만 창을 엽니다
+  agent-reach browser profiles|use ID     로그인을 가져올 로컬 브라우저 프로필 선택
+  agent-reach skill [link|unlink <dir>]   에이전트 스킬 위치 확인, 다른 AI에 연결하거나 연결 해제
+  agent-reach doctor [--text]             채널 상태와 설치된 도구 버전 (네트워크 사용 안 함)
+  agent-reach check [channel] [--text]    채널 실측. --search는 검색만 실측
+  agent-reach update [--check]            Agent Reach, 추가된 채널의 도구, 스킬 갱신
   agent-reach configure <key> [value]     groq-key | openai-key | proxy | github-token | browser-port
-  agent-reach uninstall [--dry-run]       remove everything Agent Reach installed
+  agent-reach uninstall [--dry-run]       Agent Reach가 설치한 모든 것 제거
 """
 
 
@@ -181,7 +182,8 @@ def _cmd_read(args: Sequence[str]) -> int:
     readers = [ch for ch in unified_channels() if find_action(ch, "read")]
     specific = [ch for ch in readers if ch.name != "web"]
     target = next((ch for ch in specific if ch.can_handle(ns.url)), None)
-    if target is not None and target.name == "reddit" and ns.backend in ("jina", "exa"):
+    action = find_action(target, "read") if target is not None else None
+    if action is not None and ns.backend in ("jina", "exa") and not any(label == ns.backend for label, _ in action.backends):
         target = next((ch for ch in readers if ch.name == "web"), None) or target
     target = target or next((ch for ch in readers if ch.name == "web"), None)
     if target is None:
@@ -196,6 +198,7 @@ def _cmd_channels(_args: Sequence[str]) -> int:
             {
                 "name": ch.name,
                 "description": ch.description,
+                "purpose": ch.purpose,
                 "level": ch.level,
                 "login": _login_info(ch),
                 "actions": [
@@ -328,12 +331,12 @@ def _cmd_management(head: str, args: Sequence[str]) -> int:
             try:
                 result = manage.setup()
             except ReachError as err:
-                sys.stdout.write(f"安装未完成：{err.code} {err.message}\n{err.hint or ''}\n")
+                sys.stdout.write(f"설치가 끝나지 않았습니다: {err.code} {err.message}\n{err.hint or ''}\n")
                 return 1
             sys.stdout.write(result['installation_report']['markdown'])
             report = result['installation_report']
             if report.get('path'):
-                sys.stdout.write(f"\n完整报告已保存：{report['path']}\n")
+                sys.stdout.write(f"\n전체 보고서를 저장했습니다: {report['path']}\n")
             if report.get('write_error'):
                 sys.stdout.write(f"\n{report['write_error']}\n")
             return 0 if all(row['ok'] for row in result['default_channels']) else 1
@@ -489,10 +492,6 @@ def _cmd_logout(args: Sequence[str]) -> int:
     if ch.login_url:
         from . import manage, state
         browser.clear_site(manage.site_domains(ch))
-        # Retired per-site snapshots must not revive a login after logout.
-        legacy = state.root() / "sessions" / (ch.name + "-cloak")
-        if state.owned_path(legacy):
-            manage._remove(legacy)
         def forget(saved):
             saved["checks"].pop(ch.name, None)
             saved.setdefault("session_reuse", {})[ch.name] = {"blocked": True, "at": state.now()}
@@ -518,12 +517,9 @@ def _cmd_logout(args: Sequence[str]) -> int:
 def _cmd_browser(args: Sequence[str]) -> int:
     parser = _Parser(prog="browser", add_help=False)
     parser.add_argument("op", choices=("setup", "status", "stop", "profiles", "use"))
-    parser.add_argument("--retry-cloak", action="store_true")
     parser.add_argument("profile", nargs="?")
     try:
         ns = parser.parse_args(list(args))
-        if ns.retry_cloak and ns.op != "setup":
-            raise _ArgError("--retry-cloak applies only to browser setup")
         if ns.op in ("profiles", "use"):
             from . import session_reuse
             if ns.op == "use":
@@ -539,7 +535,7 @@ def _cmd_browser(args: Sequence[str]) -> int:
                 with exclusive_browser():
                     return fn(**kw)
             if ns.op == "setup":
-                return _mgmt("browser setup", run, browser.setup, retry_cloak=ns.retry_cloak)
+                return _mgmt("browser setup", run, browser.setup)
             return _mgmt("browser stop", run, browser.stop)
         return _mgmt("browser " + ns.op, getattr(browser, ns.op))
     except _ArgError as exc:

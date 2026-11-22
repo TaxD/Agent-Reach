@@ -7,8 +7,7 @@ box, Node needs an explicit ``--js-runtimes`` config), and transcription
 readiness (whisper provider + ffmpeg/ffprobe) is surfaced for ``doctor`` without
 gating the backend. These tests stub ``probe_command`` / ``shutil.which``
 so every branch runs offline. Follow-up to #331 — extends dedicated
-channel coverage after rss (#360), github (#361), web (#363),
-reddit (#364), xueqiu (#365) and v2ex (#366).
+channel coverage after github (#361), web (#363) and reddit (#364).
 """
 
 from pathlib import Path

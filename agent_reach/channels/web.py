@@ -152,24 +152,26 @@ def _parse_jina(url: str, body: str) -> dict:
 
 class WebChannel(Channel):
     name = "web"
-    description = "网页搜索与阅读（Agent 自带工具不可用时的保底）"
+    description = "웹 검색과 임의 페이지 읽기"
+    purpose = ("전용 채널이 없는 사이트를 검색하거나 임의의 공개 웹 페이지 본문을 읽을 때 사용하는 범용 보조 수단입니다. "
+               "에이전트에 내장된 웹 검색·페이지 읽기 도구가 있으면 그것을 먼저 사용하고, 없거나 실패할 때 이 채널을 사용합니다.")
 
     level = "default"
     actions = (
         Action(
             "search",
-            "Search the web (Exa semantic search)",
+            "웹 검색 (Exa 의미 검색)",
             (
-                Param("query", "what to search for"),
-                Param("limit", "max results", required=False, type=int, default=5),
+                Param("query", "검색어"),
+                Param("limit", "최대 결과 수", required=False, type=int, default=5),
             ),
             (("exa", "_exa_search"),),
             live_test={"query": "yt-dlp github repository", "limit": 2},
         ),
         Action(
             "read",
-            "Read a web page as clean text",
-            (Param("target", "page URL"),),
+            "웹 페이지를 정리된 텍스트로 읽기",
+            (Param("target", "페이지 주소"),),
             (("jina", "_jina_read"), ("exa", "_exa_read")),
             live_test={"target": "https://example.com"},
         ),
@@ -179,7 +181,7 @@ class WebChannel(Channel):
         return True  # Fallback — handles any URL
 
     def read(self, url: str, timeout: float = 30) -> str:
-        """通过 Jina Reader 读取网页，返回 Markdown 全文。"""
+        """Read a page through Jina Reader and return its Markdown text."""
         url = normalize_public_http_url(url)
         jina_url = f"https://r.jina.ai/{url}"
         req = urllib.request.Request(
@@ -194,8 +196,8 @@ class WebChannel(Channel):
             )
         if _is_antibot_page(body):
             raise RuntimeError(
-                "Jina Reader 返回了反爬验证页，未获取到目标内容；"
-                "请改用站点专用工具或浏览器读取"
+                "Jina Reader returned an anti-bot verification page instead of the content; "
+                "use the site's own channel or another reader"
             )
         return body.decode("utf-8")
 

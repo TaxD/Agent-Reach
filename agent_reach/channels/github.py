@@ -45,6 +45,9 @@ def _parse_target(target: str):
     if not m:
         raise ReachError(BAD_INPUT, "target must be owner/repo or a github.com repo/issue/PR link")
     owner, repo, number = m.groups()
+    if owner.strip(".") == "" or repo.strip(".") == "":
+        # "." / ".." would walk the API path to other endpoints (e.g. /user) with the user's gh token.
+        raise ReachError(BAD_INPUT, "target must be owner/repo or a github.com repo/issue/PR link")
     return owner, repo, int(number) if number else None
 
 
@@ -108,24 +111,26 @@ def _repo_item(repo: dict, readme: str | None = None) -> dict:
 
 class GitHubChannel(Channel):
     name = "github"
-    description = "GitHub 仓库和代码"
+    description = "GitHub 저장소·이슈·PR"
+    purpose = ("오픈소스 저장소를 키워드로 찾거나, 저장소의 README·이슈·PR과 그 댓글을 읽을 때 사용합니다. "
+               "라이브러리의 사용법·버그 논의·변경 이력을 확인하는 1차 출처이며, 인기 급상승 저장소는 github-trending 채널을 사용합니다.")
 
     level = "default"
     actions = (
         Action(
             "search",
-            "Search repositories",
+            "저장소 검색",
             (
-                Param("query", "what to search for"),
-                Param("limit", "max results", required=False, type=int, default=5),
+                Param("query", "검색어"),
+                Param("limit", "최대 결과 수", required=False, type=int, default=5),
             ),
             (("gh", "_gh_search"), ("github-api", "_api_search")),
             live_test={"query": "yt-dlp", "limit": 2},
         ),
         Action(
             "read",
-            "Read a repository (with README) or an issue / PR (with comments)",
-            (Param("target", "owner/repo, or a repo / issue / PR link"),),
+            "저장소(README 포함) 또는 이슈/PR(댓글 포함) 읽기",
+            (Param("target", "owner/repo 또는 저장소·이슈·PR 링크"),),
             (("gh", "_gh_read"), ("github-api", "_api_read")),
             live_test={"target": "yt-dlp/yt-dlp"},
         ),

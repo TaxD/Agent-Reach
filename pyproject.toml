@@ -1,7 +1,7 @@
 [project]
 name = "agent-reach"
 version = "1.6.1"
-description = "Internet access for AI agents: one CLI with JSON output to search and read the web, YouTube, GitHub, V2EX and more."
+description = "AI 에이전트용 읽기 전용 인터넷 접근 CLI: GitHub, Stack Overflow, MDN, npm, Hacker News, GeekNews 등을 JSON으로 검색하고 읽습니다."
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
@@ -9,11 +9,10 @@ authors = [{name = "Neo Reid"}]
 keywords = [
     "ai-agent", "llm-tools", "agent-infrastructure",
     "web-reader", "web-scraper", "search",
-    "twitter-scraper", "reddit-scraper", "youtube-transcript",
-    "bilibili", "xiaohongshu",
+    "hacker-news", "stack-overflow", "mdn", "npm", "rss", "youtube-transcript",
     "ai-search", "cli", "automation",
     "claude-code", "cursor", "openai",
-    "free-api", "no-api-key",
+    "no-api-key",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -47,9 +46,9 @@ dev = [
 agent-reach = "agent_reach.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/Panniantong/agent-reach"
-Repository = "https://github.com/Panniantong/agent-reach"
-Issues = "https://github.com/Panniantong/agent-reach/issues"
+Homepage = "https://github.com/TaxD/Agent-Reach"
+Repository = "https://github.com/TaxD/Agent-Reach"
+Issues = "https://github.com/TaxD/Agent-Reach/issues"
 
 [build-system]
 requires = ["hatchling"]
