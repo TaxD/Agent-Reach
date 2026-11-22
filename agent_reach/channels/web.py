@@ -66,6 +66,19 @@ def _is_antibot_page(body: bytes) -> bool:
     return (jina_captcha_warning and challenge_structure) or cloudflare_block
 
 
+#: Phrases of bot-check and block pages. Only short pages are judged by them, so a real
+#: article that merely mentions one of them is not rejected.
+BLOCK_MARKS = ("blocked by network security", "just a moment...", "verify you are human", "confirm you are human",
+               "enable javascript and cookies to continue", "access denied", "are you a robot",
+               "unusual traffic from your")
+
+
+def is_block_page(title: object, text: object) -> bool:
+    body = str(text or "")
+    head = (str(title or "") + "\n" + body[:600]).casefold()
+    return len(body) < 1500 and any(mark in head for mark in BLOCK_MARKS)
+
+
 def _public_url(target: str) -> str:
     try:
         return normalize_public_http_url(target)
@@ -224,4 +237,8 @@ class WebChannel(Channel):
             body = self.read(url, timeout=timeout)
         except RuntimeError as exc:
             raise ReachError(UPSTREAM_BROKEN, str(exc)) from None
-        return [_parse_jina(url, body)]
+        item = _parse_jina(url, body)
+        if is_block_page(item.get("title"), item.get("text")):
+            # A short "prove you are human" / "blocked" page is not the content; let the next reader try.
+            raise ReachError(UPSTREAM_BROKEN, "the site returned a block or verification page instead of the content")
+        return [item]

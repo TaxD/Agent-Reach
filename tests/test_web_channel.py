@@ -339,3 +339,12 @@ def test_jina_redirect_to_another_origin_is_refused():
     for target in ("http://127.0.0.1/", "https://evil.example/", "http://r.jina.ai/x"):
         with pytest.raises(ReachError):
             handler.redirect_request(req, Body(), 302, "Found", {}, target)
+
+
+def test_block_and_verification_pages_are_not_content():
+    from agent_reach.channels.web import is_block_page
+
+    assert is_block_page("Let's confirm you are human", "Complete the security check before continuing.")
+    assert is_block_page("x", "You've been blocked by network security.\nTo continue, log in")
+    assert not is_block_page("How bot checks work", "Sites ask you to verify you are human. " + "A real article. " * 200)
+    assert not is_block_page("Ordinary page", "Hello world")
