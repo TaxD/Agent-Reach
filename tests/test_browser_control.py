@@ -12,8 +12,6 @@ from pathlib import Path
 
 import pytest
 
-from agent_reach.channels.reddit import RedditChannel
-from agent_reach.channels.twitter import TwitterChannel
 from agent_reach.runtime import browser, browser_watcher, cdp
 
 pytestmark = pytest.mark.skipif(not hasattr(socket, "AF_UNIX"), reason="unix sockets only")
@@ -264,35 +262,55 @@ BAD_CHANNELS = ["hackernews", "github", "web", "no-such-channel", "", None, 7, [
                 "https://www.reddit.com/login/", "reddit.com", "REDDIT", " reddit"]
 
 
-@pytest.mark.parametrize("channel", BAD_CHANNELS + ["reddit"])
-def test_open_refuses_anything_but_an_enabled_login_channel(monkeypatch, channel):
-    monkeypatch.setattr(browser, "touch", lambda: None)
-    _turn_on("hackernews", "github")  # turned on, but without a login
-    conn = _FakeConn([{"targetId": "P0", "url": "about:blank"}], [])
-    assert browser_watcher._open(conn, channel=channel) == {"ok": False, "error": "not an enabled login channel"}
-    assert browser_watcher._open(conn, url=RedditChannel().login_url)["ok"] is False, "a URL is not accepted"
-    assert conn.calls == []
+IDP_JAR = [
+    {"name": "SID", "value": "g1", "domain": ".google.com", "path": "/", "secure": True, "httpOnly": True},
+    {"name": "LSID", "value": "g2", "domain": "accounts.google.com", "path": "/", "secure": True},
+    {"name": "LOGIN_INFO", "value": "y1", "domain": ".youtube.com", "path": "/"},
+    {"name": "myacinfo", "value": "a1", "domain": "appleid.apple.com", "path": "/", "sameSite": "Strict"},
+    {"name": "session", "value": "r1", "domain": ".reddit.com", "path": "/"},
+    {"name": "auth_token", "value": "x1", "domain": ".x.com", "path": "/"},
+    {"name": "sid", "value": "n1", "domain": "notgoogle.com", "path": "/"},
+    {"name": "sid", "value": "n2", "domain": ".google.com.evil.test", "path": "/"},
+]
 
 
-def test_open_uses_the_channels_own_login_page(monkeypatch):
-    monkeypatch.setattr(browser, "touch", lambda: None)
-    _turn_on("reddit", "twitter")
-    conn = _FakeConn([{"targetId": "P0", "url": "about:blank"}], [])
-    for ch in (RedditChannel(), TwitterChannel()):
-        assert browser_watcher._open(conn, channel=ch.name) == {"ok": True}
-    assert [p for m, p in conn.calls if m == "Target.createTarget"] == [
-        {"url": RedditChannel().login_url}, {"url": TwitterChannel().login_url}]
+def test_identity_provider_cookies_are_expired_and_nothing_else():
+    conn = _FakeConn([], IDP_JAR)
+    assert browser_watcher._drop_identity_provider_cookies(conn) == 4
+    assert [c["value"] for c in conn.cookies] == ["r1", "x1", "n1", "n2"]
+    (expired,) = [p["cookies"] for m, p in conn.calls if m == "Storage.setCookies"]
+    assert [(c["name"], c["domain"]) for c in expired] == [
+        ("SID", ".google.com"), ("LSID", "accounts.google.com"), ("LOGIN_INFO", ".youtube.com"),
+        ("myacinfo", "appleid.apple.com")]
+    assert all(c["value"] == "" and c["expires"] == 1 for c in expired), "no cookie value is sent back"
+    assert expired[0]["secure"] is True and expired[3]["sameSite"] == "Strict", "attributes kept so the cookie matches"
 
 
-def test_open_reads_the_enabled_channels_fresh_each_time(monkeypatch):
-    from agent_reach.runtime import state
+def test_identity_provider_cleanup_with_nothing_to_drop_or_no_cookie_list():
+    conn = _FakeConn([], [c for c in IDP_JAR if c["value"] in {"r1", "x1", "n1", "n2"}])
+    assert browser_watcher._drop_identity_provider_cookies(conn) == 0
+    assert conn.methods() == ["Storage.getCookies"], "nothing to expire: no write"
+    for reply in ({"error": {"message": "browser closed"}}, {"result": {}}, {"result": {"cookies": "x"}}):
+        conn = _FakeConn([], IDP_JAR)
+        conn.call = lambda method, params=None, timeout=30.0, session_id=None, r=reply: r
+        with pytest.raises(RuntimeError):  # fail closed: the extension is not loaded after this
+            browser_watcher._drop_identity_provider_cookies(conn)
 
-    monkeypatch.setattr(browser, "touch", lambda: None)
-    conn = _FakeConn([{"targetId": "P0", "url": "about:blank"}], [])
-    _turn_on("reddit")
-    assert browser_watcher._open(conn, channel="reddit")["ok"] is True
-    state.mutate(lambda data: data["channels"].pop("reddit"))
-    assert browser_watcher._open(conn, channel="reddit")["ok"] is False, "a removed channel is refused at once"
+
+def test_identity_provider_cleanup_fails_closed_when_the_removal_is_refused():
+    conn = _FakeConn([], IDP_JAR)
+    real = conn.call
+    conn.call = lambda method, *a, **k: {"error": {}} if method == "Storage.setCookies" else real(method, *a, **k)
+    with pytest.raises(RuntimeError):
+        browser_watcher._drop_identity_provider_cookies(conn)
+
+
+@pytest.mark.parametrize("domain,expected", [
+    (".google.co.kr", True), ("accounts.google.de", True), ("google.com.au", True), ("me.com", True),
+    ("notgoogle.co.kr", False), ("google.com.evil.test", False), ("google.evil.example", False), ("reddit.com", False),
+])
+def test_identity_provider_domains(domain, expected):
+    assert browser_watcher._identity_provider(domain) is expected
 
 
 JAR = [
@@ -355,15 +373,15 @@ def test_extension_is_loaded_only_when_it_matches_the_pinned_release(monkeypatch
     assert conn.calls == [("Extensions.loadUnpacked", {"path": str(browser.extension_dir())})]
 
 
-def test_watcher_serves_only_the_four_commands_and_cleans_up_its_own_children(monkeypatch):
+def test_watcher_serves_only_three_commands_and_cleans_up_its_own_children(monkeypatch, short_home):
     from agent_reach.runtime import bridge
 
-    events = []
+    events, handlers = [], {}
 
     class FakeServer:
-        def __init__(self, handlers):
-            events.append(("handlers", sorted(handlers)))
-            self.handlers = handlers
+        def __init__(self, served):
+            events.append(("handlers", sorted(served)))
+            handlers["served"] = served
 
         def close(self):
             events.append("server closed")
@@ -387,16 +405,25 @@ def test_watcher_serves_only_the_four_commands_and_cleans_up_its_own_children(mo
     daemon = FakeDaemon()
     monkeypatch.setattr(browser_watcher, "ControlServer", FakeServer)
     monkeypatch.setattr(browser_watcher, "_launch_with_pipe", lambda chrome: (FakeProc(), conn))
-    monkeypatch.setattr(browser, "extension_intact", lambda: False)
+    monkeypatch.setattr(browser, "extension_intact", lambda: True)
     monkeypatch.setattr(bridge, "start", lambda: daemon)
     monkeypatch.setattr(bridge, "close", lambda proc: events.append(("daemon closed", proc is daemon)))
     started = time.monotonic()
     assert browser_watcher.watch("/fake/chrome", idle=0.3, poll=0.05) == "closed after idle"
     assert time.monotonic() - started < 5
-    assert events[0] == ("handlers", ["clear_site", "close", "open", "ping"])
+    assert events[0] == ("handlers", ["clear_site", "close", "ping"])
+    methods = conn.methods()
+    assert methods.index("Storage.getCookies") < methods.index("Extensions.loadUnpacked"), \
+        "identity provider cookies go before the extension can read the profile"
     assert ("Browser.close", None) in conn.calls
     assert events[1:] == ["server closed", "pipe closed", "chrome waited", ("daemon closed", True)]
     assert not browser.watcher_running(), "the watcher lock is released"
+    srv = cdp.ControlServer(handlers["served"])
+    try:
+        assert cdp.request("open", channel="reddit") == {"ok": False, "error": "unknown command"}
+        assert cdp.request("ping") == {"ok": True, "context": None}
+    finally:
+        srv.close()
 
 
 def test_a_second_watcher_does_not_start(monkeypatch):

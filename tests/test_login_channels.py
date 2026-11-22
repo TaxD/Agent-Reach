@@ -17,7 +17,7 @@ from agent_reach.runtime.result import ReachError
 @pytest.fixture
 def no_browser(monkeypatch):
     """Any attempt to prepare the dedicated browser fails the test."""
-    for module, name in ((browser_binding, "environment"), (browser, "ensure_running"), (browser, "start"),
+    for module, name in ((browser_binding, "environment"), (browser, "ensure_running"), (browser, "login_window"),
                          (browser, "clear_site"), (manage, "add")):
         monkeypatch.setattr(module, name, Mock(side_effect=AssertionError(f"{name} must not run")))
 

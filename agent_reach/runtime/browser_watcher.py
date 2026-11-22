@@ -7,14 +7,16 @@ socket (cdp.ControlServer) and closes everything after the idle limit. Only
 Agent Reach commands count as use; nothing a web page does can keep it open.
 
 It is the only process that can talk to Chrome. It never returns cookie
-values to anyone: the control commands are ping, open (the login page of an
-enabled login channel, by name), clear_site (that channel's own site) and close.
+values to anyone: the control commands are ping, clear_site (the site of an
+enabled login channel, by name) and close. Logging in happens in a separate,
+ordinary Chrome window that this process is not attached to (browser.login_window).
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -98,18 +100,34 @@ def _enabled_login_channel(name: object):
     return next((ch for ch in get_all_channels() if ch.name == name and ch.login_url and is_added(ch, data)), None)
 
 
-def _open(conn: PipeConnection, channel: object = None, **_ignored) -> dict:
-    """Open the login page of one enabled login channel in a new tab and bring it to the front."""
-    ch = _enabled_login_channel(channel)
-    if ch is None:
-        return {"ok": False, "error": "not an enabled login channel"}
-    reply = conn.call("Target.createTarget", {"url": ch.login_url})
-    target = (reply.get("result") or {}).get("targetId")
-    if not target:
-        return {"ok": False, "error": "could not open a tab"}
-    conn.call("Target.activateTarget", {"targetId": target}, timeout=5)
-    browser.touch()
-    return {"ok": True}
+#: Sign-in providers the user may have used in the login window. Their own session is not
+#: needed for reading reddit or x.com and must not sit in a profile that an extension can read.
+_IDENTITY_PROVIDERS = ("google.com", "youtube.com", "googleusercontent.com", "apple.com", "icloud.com", "me.com")
+#: Google's country domains (google.co.kr, google.de, google.com.au) carry the same session.
+_GOOGLE_COUNTRY = re.compile(r"(^|\.)google\.(com?\.)?[a-z]{2,3}$")
+
+
+def _identity_provider(domain: str) -> bool:
+    return (any(domain_matches(domain, d) for d in _IDENTITY_PROVIDERS)
+            or bool(_GOOGLE_COUNTRY.search(domain.lower().rstrip("."))))
+
+
+def _drop_identity_provider_cookies(conn: PipeConnection) -> int:
+    """Expire the identity providers' cookies before the extension is loaded. Returns how many.
+
+    Raises when the cookies cannot be listed or removed: the extension must not be loaded
+    into a profile that may still hold those sessions.
+    """
+    cookies = (conn.call("Storage.getCookies").get("result") or {}).get("cookies")
+    if not isinstance(cookies, list):
+        raise RuntimeError("could not list the profile's cookies")
+    doomed = [c for c in cookies if isinstance(c, dict) and _identity_provider(str(c.get("domain", "")))]
+    del cookies
+    keys = ("name", "domain", "path", "secure", "httpOnly", "sameSite", "partitionKey", "sourceScheme", "sourcePort")
+    expired = [{**{k: c[k] for k in keys if k in c}, "value": "", "expires": 1} for c in doomed]
+    if expired and "result" not in conn.call("Storage.setCookies", {"cookies": expired}):
+        raise RuntimeError("could not remove the identity providers' cookies")
+    return len(expired)
 
 
 def _clear_site(conn: PipeConnection, channel: object = None, **_ignored) -> dict:
@@ -169,6 +187,8 @@ def watch(chrome: str, idle: Optional[float] = None, poll: float = 3.0) -> str:
             return "another watcher is running"
         bridge_proc = bridge.start()
         proc, conn = _launch_with_pipe(chrome)
+        dropped = _drop_identity_provider_cookies(conn)
+        print(f"identity provider cookies removed: {dropped}", file=sys.stderr, flush=True)
         _load_extension(conn)
         context: dict = {"id": None}
         stopping = threading.Event()
@@ -180,7 +200,6 @@ def watch(chrome: str, idle: Optional[float] = None, poll: float = 3.0) -> str:
         connection = conn
         server = ControlServer({
             "ping": lambda **_: {"ok": True, "context": context["id"]},
-            "open": lambda **kw: _open(connection, **kw),
             "clear_site": lambda **kw: _clear_site(connection, **kw),
             "close": close,
         })

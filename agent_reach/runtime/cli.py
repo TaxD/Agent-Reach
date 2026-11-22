@@ -412,7 +412,10 @@ def _login_channel(cmd: str, args: Sequence[str]) -> Channel:
 
 
 def _cmd_login(args: Sequence[str]) -> int:
-    """Open the channel's login page in the visible dedicated browser. The user logs in; nothing is typed for them."""
+    """Open the channel's login page in an ordinary Chrome window on the dedicated profile.
+
+    Nothing is attached to that window. The user logs in and closes it; nothing is typed for them.
+    """
     try:
         ch = _login_channel("login", args)
     except _ArgError as exc:
@@ -424,7 +427,7 @@ def _cmd_login(args: Sequence[str]) -> int:
         with exclusive_browser():  # opening the window may start the browser
             if not manage.is_added(ch):  # turned off while this command waited
                 raise ReachError(NEED_SETUP, f"{ch.name} is not turned on")
-            browser.start(ch.name)
+            browser.login_window(ch.login_url)
         state.mutate(lambda data: data.setdefault("session_revisions", {}).__setitem__(ch.name, state.now()))
     except ReachError as err:
         return _emit(envelope(channel=ch.name, action="login", error=err))

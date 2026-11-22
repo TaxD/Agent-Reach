@@ -95,7 +95,7 @@ def env(monkeypatch):
     monkeypatch.setattr(browser, "ensure_chrome", lambda: calls.append("ensure_chrome") or "/x/chrome")
     monkeypatch.setattr(browser, "chrome_binary", lambda: "/x/chrome")
     monkeypatch.setattr(browser, "refresh_extension", lambda: calls.append("refresh_extension") or {})
-    monkeypatch.setattr(browser, "start", lambda url="about:blank": calls.append(("start", url)))
+    monkeypatch.setattr(browser, "login_window", lambda url: calls.append(("login_window", url)))
     monkeypatch.setattr(browser, "clear_site", lambda name: calls.append(("clear_site", name)) or 3)
     monkeypatch.setattr(browser, "is_running", lambda: False)
     monkeypatch.setattr(browser, "stop", lambda *a, **k: stopped.append(True) or True)

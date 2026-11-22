@@ -360,7 +360,7 @@ def fake_browser(monkeypatch):
     monkeypatch.setattr(browser, "watcher_running", lambda: state["running"] or state["closing"])
     monkeypatch.setattr(browser, "connected_contexts", lambda: list(state["contexts"]))
     monkeypatch.setattr(browser, "_launch", fake_launch)
-    monkeypatch.setattr(browser, "start", lambda url: state["opened"].append(url))
+    monkeypatch.setattr(browser, "login_window", lambda url: state["opened"].append(url))
     monkeypatch.setattr(browser, "START_WAIT", 0.5)
     return state
 
@@ -486,7 +486,7 @@ def test_login_opens_site_in_dedicated_browser(capsys, monkeypatch, fake_browser
     monkeypatch.setattr(manage, "is_added", lambda ch, data=None: True)
     code, out = _run(capsys, ["login", "web2"])
     assert code == 0
-    assert fake_browser["opened"] == ["web2"], "only the channel name crosses the socket; the watcher looks up the page"
+    assert fake_browser["opened"] == ["https://example.test/login"], "the channel's own login page, in a plain window"
     assert out["items"][0]["opened"] == "https://example.test/login"
 
 

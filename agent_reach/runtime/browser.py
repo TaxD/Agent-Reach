@@ -5,6 +5,9 @@ login channels (reddit, twitter). Design rules:
 
 - Only an installed Google Chrome/Chromium is used; no browser is downloaded.
 - The window is always visible. The user can see what is done with their login.
+- The user logs in in an ordinary Chrome window on the same profile, with nothing attached
+  to it (no debugging pipe, no extension, no daemon). Automation starts only after that
+  window is closed, and cookies of identity providers (Google, Apple) are removed first.
 - Chrome is driven over --remote-debugging-pipe. There is no TCP debugging port.
 - The watcher process owns the pipe and offers a few commands on a private unix
   socket (see cdp.py). No cookie value leaves the browser profile: nothing is
@@ -416,6 +419,11 @@ def ensure_running() -> str:
     """Make the browser ready (window open, extension connected to the daemon); returns the OpenCLI profile id."""
     from .clock import off_the_clock
 
+    if login_window_pid() is not None:
+        # The user may be typing a password there. A query never closes that window.
+        raise ReachError("BUSY", "The user's login window is still open",
+                         hint="Wait until the user says they finished logging in. Then run `agent-reach browser stop` "
+                              "(it closes the login window and keeps the login), and retry.")
     touch()
 
     def ready() -> Optional[str]:
@@ -452,23 +460,78 @@ def ensure_running() -> str:
     return found[-1]
 
 
-def start(url: str) -> None:
-    """Open the login page of channel `url` (a channel name) in the dedicated browser window.
+def _login_command(pid: int) -> str:
+    try:
+        return subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)], capture_output=True, text=True,
+                              timeout=10).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
 
-    The caller holds exclusive_browser(). The watcher looks the page up itself.
+
+def login_window_pid() -> Optional[int]:
+    """The plain Chrome this program opened for the user's login, while it is still running.
+
+    The recorded pid counts only if that process is a Chrome on our profile without a
+    debugging interface, so a reused pid is never mistaken for it.
     """
-    from . import cdp
+    pid = _load_state().get("login_pid")
+    if pid is None:
+        return None
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid > 1:
+        command = _login_command(pid)
+        if f"--user-data-dir={profile_dir()}" in command and "--remote-debugging" not in command:
+            return pid
+    update_state(login_pid=None)
+    return None
 
-    ensure_running()
-    reply = cdp.request("open", channel=url)
-    if not reply or not reply.get("ok"):
-        raise ReachError(UPSTREAM_BROKEN, "could not open the login page in the Agent Reach browser")
+
+def login_window(url: str) -> None:
+    """Open `url` in an ordinary Chrome on the dedicated profile, for the user to log in.
+
+    The caller holds exclusive_browser(). Nothing is attached to this window: no debugging
+    pipe, no extension, no daemon. The user types credentials into a browser that this
+    program cannot observe or control; automation starts only after they close it.
+    (Identity providers such as Google refuse sign-in in a browser under automation.)
+    """
+    from . import state as ledger
+
+    exe = ensure_chrome()
+    # A login window that is already open stays: Chrome hands the new page to it and the
+    # process started below exits at once, so the recorded pid must not change.
+    already_open = login_window_pid() is not None
+    if not already_open and not stop():
+        raise ReachError(UPSTREAM_BROKEN, "The dedicated browser could not close before opening the login window")
+    make_private_dir(profile_dir())
+    ledger.remember_path(profile_dir(), "dedicated browser profile")
+    proc = subprocess.Popen(
+        [exe, f"--user-data-dir={profile_dir()}", "--no-first-run", "--no-default-browser-check", "--new-window", url],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        cwd=str(browser_root()), start_new_session=True)
+    if not already_open:
+        update_state(login_pid=proc.pid)
+
+
+def close_login_window(timeout: float = 20.0) -> bool:
+    """Ask the login Chrome we started to quit (it saves the session). True when it is gone."""
+    import signal
+
+    pid = login_window_pid()
+    if pid is None:
+        return True
+    with contextlib.suppress(OSError):
+        os.kill(pid, signal.SIGTERM)
+    gone = wait_for(lambda: login_window_pid() is None, timeout, interval=0.3)
+    if gone:
+        update_state(login_pid=None)
+    return gone
 
 
 def stop(timeout: float = 20.0) -> bool:
     """Ask the watcher to close the browser. True when nothing of ours is running afterwards."""
     from . import cdp
 
+    if not close_login_window(timeout):
+        return False
     if not watcher_running():
         return True
     cdp.request("close", timeout=5)
@@ -552,6 +615,7 @@ def status() -> dict:
         "extension_version": extension_version(),
         "extension_intact": extension_intact(),
         "running": info is not None,
+        "login_window_open": login_window_pid() is not None,
         "window": "visible",
         "debugging_port": None,
         "opencli_context": context or bound_context(),

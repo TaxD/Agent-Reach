@@ -122,7 +122,9 @@ def _has_login(ch) -> bool:
 
 def browser_login_next(ch) -> str:
     """The single sentence for the user after the login page opened in the Agent Reach browser."""
-    return f"The user logs in to {ch.name} in the Agent Reach browser window that just opened; then retry the action."
+    return (f"An ordinary Chrome window opened on the dedicated profile. The user logs in to {ch.name} there themselves "
+            "(any method the site offers, including Google or Apple sign-in), then says so. After that, run "
+            "`agent-reach browser stop` to close that window, and retry the action. Never log in for them.")
 
 # ── checks ──
 

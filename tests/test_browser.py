@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import subprocess
 import threading
 import zipfile
 
@@ -225,12 +226,155 @@ def test_clear_site_never_opens_a_browser_that_was_never_used(home, monkeypatch)
     assert browser.clear_site("reddit") == 0
 
 
-def test_start_sends_only_the_channel_name(home, monkeypatch):
-    monkeypatch.setattr(browser, "ensure_running", lambda: "dedicated")
-    sent = []
-    monkeypatch.setattr(cdp, "request", lambda command, timeout=15.0, **args: sent.append((command, args)) or {"ok": True})
-    browser.start("twitter")
-    assert sent == [("open", {"channel": "twitter"})]
+LOGIN_URL = "https://www.reddit.com/login/"
+
+
+@pytest.fixture
+def procs(home, monkeypatch):
+    """A fake process table: pid -> command line, answered to `ps`. Signals are recorded, never sent."""
+    table: dict = {}
+    killed: list = []
+
+    def run(argv, **kwargs):
+        assert argv[:2] == ["ps", "-ww"], argv
+        return subprocess.CompletedProcess(argv, 0, stdout=table.get(int(argv[-1]), "") + "\n", stderr="")
+
+    def kill(pid, sig):
+        killed.append((pid, sig))
+        if table.get("dies_on_term", True):
+            table.pop(pid, None)
+
+    monkeypatch.setattr(browser.subprocess, "run", run)
+    monkeypatch.setattr(browser.os, "kill", kill)
+    return {"table": table, "killed": killed}
+
+
+def _login_cmd(*extra):
+    return " ".join(["/x/chrome", f"--user-data-dir={browser.profile_dir()}", "--no-first-run", *extra, LOGIN_URL])
+
+
+def test_login_window_closes_the_automated_browser_first_and_attaches_nothing(procs, monkeypatch):
+    from agent_reach.runtime.result import ReachError
+
+    events, launched = [], []
+
+    class Proc:
+        pid = 4242
+
+    def popen(argv, **kwargs):
+        events.append("popen")
+        launched.append((argv, kwargs))
+        return Proc()
+
+    monkeypatch.setattr(browser, "ensure_chrome", lambda: "/x/chrome")
+    monkeypatch.setattr(browser, "stop", lambda *a, **k: events.append("stop") or True)
+    monkeypatch.setattr(browser.subprocess, "Popen", popen)
+    browser.login_window(LOGIN_URL)
+    assert events == ["stop", "popen"], "the automated browser is closed before the login window opens"
+    ((argv, kwargs),) = launched
+    assert argv[0] == "/x/chrome" and argv[-1] == LOGIN_URL
+    assert f"--user-data-dir={browser.profile_dir()}" in argv
+    assert not [a for a in argv if a.startswith("--remote-debugging")]
+    assert "--enable-unsafe-extension-debugging" not in argv
+    assert not [a for a in argv if a.startswith("--load-extension")]
+    assert kwargs.get("start_new_session") is True
+    assert browser._load_state()["login_pid"] == 4242
+
+    # The automated browser would not close: no login window opens.
+    events.clear()
+    browser.update_state(login_pid=None)
+    monkeypatch.setattr(browser, "stop", lambda *a, **k: events.append("stop") or False)
+    with pytest.raises(ReachError) as err:
+        browser.login_window(LOGIN_URL)
+    assert err.value.code == "UPSTREAM_BROKEN"
+    assert events == ["stop"] and "login_pid" not in browser._load_state()
+
+
+def test_login_window_pid_counts_only_our_plain_chrome(procs):
+    procs["table"][4242] = _login_cmd("--new-window")
+    browser.update_state(login_pid=4242)
+    assert browser.login_window_pid() == 4242
+    assert browser._load_state()["login_pid"] == 4242
+
+    cases = {
+        "pid reused by another program": "/usr/bin/python3 -m http.server",
+        "another Chrome profile": "/x/chrome --user-data-dir=/tmp/elsewhere --new-window",
+        "a Chrome under automation": _login_cmd("--remote-debugging-pipe"),
+        "a Chrome with a debugging port": _login_cmd("--remote-debugging-port=9222"),
+        "process gone": "",
+    }
+    for why, command in cases.items():
+        procs["table"][4242] = command
+        browser.update_state(login_pid=4242)
+        assert browser.login_window_pid() is None, why
+        assert "login_pid" not in browser._load_state(), f"{why}: the record is cleared"
+
+
+@pytest.mark.parametrize("record", ["4242", 4242.0, True, 1, 0, -7, [4242], {"pid": 4242}])
+def test_a_malformed_login_record_is_ignored_and_cleared(procs, record):
+    procs["table"][4242] = _login_cmd()
+    browser.update_state(login_pid=record)
+    assert browser.login_window_pid() is None
+    assert "login_pid" not in browser._load_state()
+
+
+def test_queries_wait_while_the_login_window_is_open(procs, monkeypatch):
+    from agent_reach.runtime import bridge
+    from agent_reach.runtime.browser_binding import environment
+    from agent_reach.runtime.result import ReachError
+
+    procs["table"][4242] = _login_cmd()
+    browser.update_state(login_pid=4242)
+    for module, name in ((browser, "_launch"), (browser, "stop"), (browser, "close_login_window"),
+                         (bridge, "start"), (bridge, "require_running"), (cdp, "request")):
+        monkeypatch.setattr(module, name, lambda *a, _n=name, **k: pytest.fail(f"{_n} must not run"))
+    for call in (browser.ensure_running, lambda: environment("reddit")):
+        with pytest.raises(ReachError) as err:
+            call()
+        assert err.value.code == "BUSY"
+    assert procs["killed"] == [], "a query never closes the login window"
+    assert browser._load_state()["login_pid"] == 4242
+
+
+def test_stop_closes_the_login_window_first(procs, monkeypatch):
+    import signal
+
+    procs["table"][4242] = _login_cmd()
+    browser.update_state(login_pid=4242)
+    monkeypatch.setattr(browser, "watcher_running", lambda: False)
+    monkeypatch.setattr(cdp, "request", lambda *a, **k: pytest.fail("nothing else to close"))
+    assert browser.stop(timeout=1) is True
+    assert procs["killed"] == [(4242, signal.SIGTERM)]
+    assert "login_pid" not in browser._load_state()
+    monkeypatch.setattr(cdp, "request", lambda *a, **k: None)
+    assert browser.status()["login_window_open"] is False
+
+
+def test_stop_fails_when_the_login_window_does_not_close(home, monkeypatch):
+    monkeypatch.setattr(browser, "close_login_window", lambda timeout=20.0: False)
+    monkeypatch.setattr(browser, "watcher_running", lambda: True)
+    monkeypatch.setattr(cdp, "request", lambda *a, **k: pytest.fail("the watcher is not asked while the window is open"))
+    assert browser.stop(timeout=1) is False
+
+
+def test_close_login_window_signals_only_the_recorded_login_chrome(procs):
+    import signal
+
+    assert browser.close_login_window(timeout=0.5) is True and procs["killed"] == [], "nothing recorded"
+    procs["table"][4242] = "/usr/bin/vim notes.txt"
+    browser.update_state(login_pid=4242)
+    assert browser.close_login_window(timeout=0.5) is True and procs["killed"] == [], "a reused pid is never signalled"
+    procs["table"][4242] = _login_cmd()
+    procs["table"][5151] = _login_cmd()  # not the recorded one
+    browser.update_state(login_pid=4242)
+    procs["table"]["dies_on_term"] = False
+    assert browser.close_login_window(timeout=0.5) is False, "still running after the wait"
+    assert browser._load_state()["login_pid"] == 4242
+    procs["table"]["dies_on_term"] = True
+    assert browser.close_login_window(timeout=0.5) is True
+    assert {pid for pid, _ in procs["killed"]} == {4242}
+    assert all(sig == signal.SIGTERM for _, sig in procs["killed"])
+    assert 5151 in procs["table"]
 
 
 def test_stop_closes_through_the_control_socket(home, monkeypatch):
@@ -306,3 +450,17 @@ def test_stop_without_flock_support_does_not_report_a_running_browser(home, monk
     monkeypatch.setattr(cdp, "request", lambda *a, **k: None)
     assert browser.watcher_running() is False
     assert browser.stop(timeout=0.2) is True
+
+
+def test_a_second_login_keeps_the_open_login_window(monkeypatch):
+    """Chrome hands the new page to the running window, so it is neither closed nor re-recorded."""
+    browser.update_state(login_pid=4242)
+    monkeypatch.setattr(browser, "ensure_chrome", lambda: "/chrome")
+    monkeypatch.setattr(browser, "login_window_pid", lambda: 4242)
+    monkeypatch.setattr(browser, "stop", lambda *a, **k: pytest.fail("the open login window must stay"))
+    started = []
+    monkeypatch.setattr(browser.subprocess, "Popen",
+                        lambda argv, **k: started.append(argv) or type("P", (), {"pid": 9999})())
+    browser.login_window("https://x.com/i/flow/login")
+    assert started[0][-1] == "https://x.com/i/flow/login"
+    assert browser._load_state()["login_pid"] == 4242

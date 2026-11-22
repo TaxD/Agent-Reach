@@ -71,7 +71,8 @@ agent-reach read https://news.ycombinator.com/item?id=8863   # 링크에 맞는 
 agent-reach doctor --text          # 채널 상태 (네트워크 사용 안 함)
 agent-reach check <채널> --text    # 채널 실측
 agent-reach add twitter            # 로그인 채널 켜기 (Node.js와 Chrome은 미리 설치되어 있어야 함)
-agent-reach login twitter          # 보이는 전용 브라우저 창에서 사용자가 직접 로그인
+agent-reach login twitter          # 자동화가 붙지 않은 일반 Chrome 창(전용 프로필)에서 사용자가 직접 로그인
+agent-reach browser stop           # 로그인을 마친 뒤 로그인 창 닫기 (이후 조회 가능)
 agent-reach logout twitter
 agent-reach configure github-token # 값은 숨김 입력
 agent-reach uninstall --dry-run    # 삭제될 항목 미리 보기
