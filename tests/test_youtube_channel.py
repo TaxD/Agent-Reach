@@ -211,3 +211,37 @@ def test_subtitles_are_read_only_up_to_the_limit(monkeypatch):
     monkeypatch.setattr(youtube, "_MAX_SUBTITLE_CHARS", 1000)
     (item,) = youtube.YouTubeChannel()._ytdlp_subtitle(target=VID, lang="en", timeout=5)
     assert 0 < len(item["text"]) <= 1000
+
+
+@pytest.mark.parametrize("lang", ["all", "en.*", ".*", "", " , ", "en,ko,ja,fr,de", "-live_chat", "en,all",
+                                  "e", "english", "en-", "en_US", "en/../x", "en;rm", "ko-KR-x-y"])
+def test_subtitle_languages_must_be_a_few_literal_tags(ytdlp, lang):
+    with pytest.raises(ReachError) as caught:
+        youtube.YouTubeChannel()._ytdlp_subtitle(target=VID, lang=lang, timeout=5)
+    assert caught.value.code == "BAD_INPUT"
+    assert ytdlp == []
+
+
+@pytest.mark.parametrize("lang, passed", [("ko", "ko"), ("ko,en", "ko,en"), (" en , ko ", "en,ko"),
+                                          ("zh-Hans", "zh-Hans"), ("pt-BR,es-419,en,ko", "pt-BR,es-419,en,ko")])
+def test_literal_language_tags_reach_yt_dlp(monkeypatch, lang, passed):
+    seen = []
+
+    def fake_run_cmd(argv, **kwargs):
+        seen.append(argv)
+        raise ReachError("NOT_FOUND", "stop here")
+
+    monkeypatch.setattr(youtube, "run_cmd", fake_run_cmd)
+    with pytest.raises(ReachError):
+        youtube.YouTubeChannel()._ytdlp_subtitle(target=VID, lang=lang, timeout=5)
+    argv = seen[0]
+    assert argv[argv.index("--sub-langs") + 1] == passed
+
+
+@pytest.mark.parametrize("target", [VID + "\n", f"https://youtu.be/{VID}%0A", f"https://www.youtube.com/watch?v={VID}%0A"])
+def test_an_id_with_a_trailing_newline_is_not_an_id(target):
+    if target.endswith("\n"):  # strip() would remove a bare trailing newline, so check the matcher itself
+        assert youtube._VIDEO_ID_RE.fullmatch(target) is None
+        return
+    with pytest.raises(ReachError):
+        youtube._video_id(target)

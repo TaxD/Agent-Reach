@@ -742,3 +742,93 @@ def test_skill_unlink_survives_update_until_linked_again(env):
     assert (claude / "agent-reach").is_symlink(), "link clears the opt-out"
 
 
+
+
+def test_a_command_holding_old_state_cannot_bring_back_a_removed_channel(env, monkeypatch):
+    """link_skill records its link while, in another command, the user removes a channel.
+    The removal must survive the link's write (no whole-ledger save of a stale copy)."""
+    import threading
+    import time
+
+    manage.add("demo")
+    (home_dir() / ".claude").mkdir()
+    manage.place_skill()
+    other = threading.Thread(target=lambda: state.mutate(lambda data: data["channels"].pop("demo", None)))
+    real_agent_for = manage._agent_for
+
+    def agent_for_while_another_command_runs(skills_dir):
+        if not other.is_alive() and other.ident is None:
+            other.start()
+            time.sleep(0.3)  # the other command gets every chance to write now
+        return real_agent_for(skills_dir)
+
+    monkeypatch.setattr(manage, "_agent_for", agent_for_while_another_command_runs)
+    manage.link_skill(str(home_dir() / "my-ai" / "skills"))
+    other.join(10)
+    data = state.load()
+    assert "demo" not in data["channels"], "the concurrent removal was lost"
+    assert any(r["path"].endswith("my-ai/skills/agent-reach") for r in data["skill"]["links"])
+
+
+def test_tool_records_do_not_overwrite_a_concurrent_change(env, monkeypatch):
+    import threading
+    import time
+
+    manage.add("demo")
+    other = threading.Thread(target=lambda: state.mutate(lambda data: data["channels"].pop("demo", None)))
+    real_mutate = state.mutate
+
+    def slow_mutate(change):
+        def wrapped(data):
+            if other.ident is None:
+                other.start()
+                time.sleep(0.3)
+            return change(data)
+        return real_mutate(wrapped)
+
+    monkeypatch.setattr(tools.state, "mutate", slow_mutate)
+    tools.record("ffmpeg", "0.8.1")
+    other.join(10)
+    data = state.load()
+    assert "demo" not in data["channels"] and data["tools"]["ffmpeg"]["version"] == "0.8.1"
+
+
+def test_a_second_remove_that_waited_reports_nothing_removed(env, monkeypatch):
+    import contextlib
+
+    from agent_reach.runtime import browser_binding
+
+    manage.add("site")
+    cleared = []
+    monkeypatch.setattr(browser, "clear_site", lambda name: cleared.append(name) or 1)
+
+    @contextlib.contextmanager
+    def exclusive_after_the_other_remove():
+        # The other remove finished while this one waited for the browser lock.
+        state.mutate(lambda data: data["channels"].pop("site", None))
+        yield
+
+    monkeypatch.setattr(browser_binding, "exclusive_browser", exclusive_after_the_other_remove)
+    out = manage.remove("site")
+    assert out["removed"] is False and cleared == []
+
+
+def test_release_check_reads_a_bounded_answer(monkeypatch):
+    import urllib.request
+
+    reads = []
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            reads.append(n)
+            return b'{"tag_name": "v9.9.9", "body": "notes"}'
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: Resp())
+    assert update_notice.fetch_latest()["latest"] == "9.9.9"
+    assert reads == [512 * 1024]

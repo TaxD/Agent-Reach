@@ -40,7 +40,6 @@ def run_cmd(
     env: Optional[Mapping[str, str]] = None,
     cwd: Optional[str] = None,
     label: Optional[str] = None,
-    input_data: Optional[str] = None,
     drop_env_prefix: tuple = (),
 ) -> str:
     """Run an upstream command and return stdout.
@@ -68,7 +67,7 @@ def run_cmd(
         child_argv,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL,
         env=run_env,
         cwd=cwd or os.path.expanduser("~"),
         start_new_session=(sys.platform != "win32" and not supervised),
@@ -117,23 +116,23 @@ def run_cmd(
                threading.Thread(target=pump, args=(proc.stderr, "err"), daemon=True)]
     for reader in readers:
         reader.start()
-    if input_data is not None and proc.stdin is not None:
-        try:
-            proc.stdin.write(input_data.encode("utf-8"))
-            proc.stdin.close()
-        except OSError:
-            pass
     deadline = time.monotonic() + max(timeout, 0.1)
     while proc.poll() is None and not over.is_set():
         if time.monotonic() >= deadline:
             kill()
             raise ReachError(TIMEOUT, f"{name} did not finish within {timeout:.0f}s")
         time.sleep(0.02)
-    for reader in readers:
-        reader.join(timeout=5)
-    if over.is_set():  # checked after the readers finished, so a late overflow is never returned as success
+    if over.is_set():
         kill()
+    drained_by = time.monotonic() + 5
+    for reader in readers:
+        reader.join(timeout=max(0.0, drained_by - time.monotonic()))
+    if over.is_set():  # checked again after the readers finished: a late overflow is never returned as success
         raise ReachError("UPSTREAM_BROKEN", f"{name} produced more output than the {_MAX_OUTPUT_BYTES} byte limit")
+    if any(reader.is_alive() for reader in readers):
+        # A descendant still holds a pipe: the output is incomplete, so this is not a success.
+        kill()
+        raise ReachError("UPSTREAM_BROKEN", f"{name} left a process holding its output open")
     out, err = bytes(buffers["out"]), bytes(buffers["err"])
     stdout = out.decode("utf-8", errors="replace")
     stderr = err.decode("utf-8", errors="replace")

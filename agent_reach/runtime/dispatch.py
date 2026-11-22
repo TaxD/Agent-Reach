@@ -228,6 +228,9 @@ def run_action(
     errors: List[ReachError] = []
     cached_errors: List[ReachError] = []
     try:
+        if channel.level == "default" and channel.name in state.load().get("removed_defaults", []):
+            raise ReachError(NEED_SETUP, f"{channel.name} was turned off by the user",
+                             hint=f"Only if the user asks for it, turn it back on with `agent-reach add {channel.name}`.")
         limited = cooldown(channel.name)
         if limited:
             raise ReachError(RATE_LIMITED, limited["message"],

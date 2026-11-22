@@ -120,8 +120,12 @@ def _something_listens() -> bool:
     try:
         with socket.create_connection(("127.0.0.1", 19825), timeout=1):
             return True
-    except OSError:
+    except ConnectionRefusedError:
         return False
+    except OSError:
+        # Could not find out (timeout, permission...). That is not "nothing there".
+        raise ReachError(NEED_SETUP, "Could not check the OpenCLI daemon port 19825",
+                         hint="Retry in a moment. Nothing was started or stopped.") from None
 
 
 def status() -> dict:
@@ -137,7 +141,9 @@ def status() -> dict:
     try:
         value = _signed_get("/status")
     except (OSError, ValueError):
-        return {}
+        # It proved it is ours a moment ago but did not give an authenticated status now.
+        raise ReachError(NEED_SETUP, "The OpenCLI daemon did not return an authenticated status",
+                         hint="Retry in a moment. Nothing was started or stopped.") from None
     return value if isinstance(value, dict) and value.get("ok") else {}
 
 

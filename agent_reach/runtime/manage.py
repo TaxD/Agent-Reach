@@ -330,6 +330,9 @@ def remove(name: str) -> dict:
         # cleanup and the moment the channel stops being enabled. The registration is
         # kept if the cleanup fails.
         with exclusive_browser():
+            if not is_added(ch):  # another remove finished while this one waited
+                return {"channel": name, "removed": False, "removed_tools": [], "cleared_cookies": 0,
+                        "browser_deleted": False, "warnings": []}
             cookies = browser.clear_site(name)
             ch.on_remove()
             state.mutate(forget)
@@ -602,12 +605,13 @@ def link_skill(skills_dir: str) -> dict:
     if kind is None:
         raise ReachError(BAD_INPUT, f"{target_dir / SKILL_NAME}: {reason}; left it untouched",
                          hint="Ask the user to move it away, then run this again.")
-    data = state.load()
     path = str(target_dir / SKILL_NAME)
-    data["skill"]["links"] = [r for r in data["skill"]["links"] if r["path"] != path]
-    data["skill"]["links"].append({"agent": _agent_for(target_dir), "path": path, "kind": kind})
-    _forget_unlinked(data, target_dir)
-    state.save(data)
+
+    def remember(data):
+        data["skill"]["links"] = [r for r in data["skill"]["links"] if r["path"] != path]
+        data["skill"]["links"].append({"agent": _agent_for(target_dir), "path": path, "kind": kind})
+        _forget_unlinked(data, target_dir)
+    state.mutate(remember)
     return skill_status()
 
 
@@ -625,11 +629,11 @@ def unlink_skill(skills_dir: str) -> dict:
         _remove_skill_copy(target)
     elif target.exists() or target.is_symlink():
         raise ReachError(BAD_INPUT, f"{target}: not an Agent Reach link or copy; left it untouched")
-    data = state.load()
-    data["skill"]["links"] = [r for r in data["skill"]["links"] if r["path"] != str(target)]
-    _forget_unlinked(data, target_dir)
-    data["skill"]["unlinked"].append(str(target_dir))
-    state.save(data)
+    def forget(data):
+        data["skill"]["links"] = [r for r in data["skill"]["links"] if r["path"] != str(target)]
+        _forget_unlinked(data, target_dir)
+        data["skill"]["unlinked"].append(str(target_dir))
+    state.mutate(forget)
     return skill_status()
 
 
@@ -666,7 +670,7 @@ def _optional_entry(c) -> dict:
 def setup() -> dict:
     """Add the default channels (except ones the user removed) and place the skill."""
     if not state.exists():
-        state.save(state.load())
+        state.mutate(lambda data: None)
     user_actions = _retired_mcp_notice()
     state.mutate(lambda saved: [saved.pop(key, None) for key in ("reuse_sources", "ask_pending", "pending")])
     skill = place_skill()
@@ -781,14 +785,17 @@ def sync() -> dict:
 
     `user_actions` are plain sentences for what the user must do now.
     """
-    data = state.load()
     known = {c.name for c in _channels()}
-    dropped = sorted(set(data["channels"]) - known)
-    for n in dropped:
-        data["channels"].pop(n, None)
-        data["checks"].pop(n, None)
-    data["removed_defaults"] = [n for n in data["removed_defaults"] if n in known]
-    state.save(data)
+
+    def drop_unknown(data):
+        gone = sorted(set(data["channels"]) - known)
+        for n in gone:
+            data["channels"].pop(n, None)
+            data["checks"].pop(n, None)
+        data["removed_defaults"] = [n for n in data["removed_defaults"] if n in known]
+        return gone
+    dropped = state.mutate(drop_unknown)
+    data = state.load()
     actions = [f"The {n} channel is no longer part of Agent Reach and was removed." for n in dropped]
     added = [c for c in _channels() if is_added(c, data)]
     synced, problems, failed = [], [], set()

@@ -246,10 +246,8 @@ def _install(tool: Tool) -> None:
 
 
 def record(name: str, version: Optional[str], *, owner: str = OURS, scope: str = "private") -> dict:
-    data = state.load()
     entry = {"owner": owner, "scope": scope, "version": version}
-    data["tools"][name] = entry
-    state.save(data)
+    state.mutate(lambda data: data["tools"].__setitem__(name, entry))
     return {"tool": name, **entry}
 
 
@@ -286,19 +284,16 @@ def ensure(name: str, *, upgrade: bool = False) -> dict:
 
 def remove_private(name: str) -> bool:
     """Delete one of our installs and its record. System copies are never touched."""
-    data = state.load()
-    entry = data["tools"].get(name)
+    entry = state.load()["tools"].get(name)
     if not entry or entry.get("owner") != OURS:
         return False
-    removed = data["tools"].pop(name, None) is not None
     if _SAFE_NAME.fullmatch(name) and tool_dir(name).exists():
         from agent_reach.utils.paths import ensure_no_symlink_path
 
         ensure_no_symlink_path(tool_dir(name), "private tool")
         shutil.rmtree(tool_dir(name))
-        removed = True
-    state.save(data)
-    return removed
+    state.mutate(lambda data: data["tools"].pop(name, None))
+    return True
 
 
 def closure(names: Iterable[str]) -> Set[str]:
@@ -320,9 +315,9 @@ def prune(keep: Set[str]) -> List[str]:
         if name in keep:
             continue
         if entry.get("owner") != OURS or not _SAFE_NAME.match(name):
-            data = state.load()
-            data["tools"].pop(name, None)
-            state.save(data)
+            def forget(data: dict, n: str = name) -> None:
+                data["tools"].pop(n, None)
+            state.mutate(forget)
             continue
         if remove_private(name):
             removed.append(name)

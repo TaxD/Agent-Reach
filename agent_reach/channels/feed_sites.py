@@ -104,7 +104,9 @@ class GeekNewsChannel(_FeedSite):
     )
 
     def _latest(self, *, limit: int, timeout: float) -> list:
-        return feed_items("https://news.hada.io/rss/news", limit, timeout)
+        # The site redirects its own feed address here; requesting the final host directly keeps the
+        # request on one origin (a cross-host redirect is refused when a proxy is in use).
+        return feed_items("https://feeds.feedburner.com/geeknews-feed", limit, timeout)
 
 
 class YozmChannel(_FeedSite):

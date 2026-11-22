@@ -159,3 +159,19 @@ def test_login_channels_are_exactly_reddit_and_twitter():
             assert all(command in opencli.READ_ONLY[ch.name]
                        for action in ch.actions for label, method in action.backends if label == "opencli"
                        for command in [method.removeprefix("_opencli_")])
+
+
+def test_a_default_channel_the_user_removed_runs_nothing(monkeypatch):
+    from agent_reach.channels.hackernews import HackerNewsChannel
+
+    ch = HackerNewsChannel()
+    assert ch.level == "default"
+    state.mutate(lambda data: data["removed_defaults"].append(ch.name))
+    for _, method in (b for a in ch.actions for b in a.backends):
+        monkeypatch.setattr(HackerNewsChannel, method, Mock(side_effect=AssertionError("ran a removed channel")))
+    monkeypatch.setattr(WebChannel, "_exa_search", Mock(side_effect=AssertionError("public web for a removed channel")))
+    for action in ch.actions:
+        params = dict(action.live_test or {p.name: "x" for p in action.params if p.required})
+        out = run_action(ch, action.name, params)
+        assert out["error"]["code"] == "NEED_SETUP", action.name
+        assert "agent-reach add hackernews" in out["error"]["hint"]

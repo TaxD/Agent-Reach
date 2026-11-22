@@ -46,3 +46,13 @@ def test_loader_errors_never_quote_the_file(tmp_path, payload):
     assert "secret" not in str(caught.value) and "pw-" not in str(caught.value)
     assert caught.value.__cause__ is None and caught.value.__suppress_context__, "no chained loader message is shown"
     assert path.read_text(encoding="utf-8") == payload
+
+
+@pytest.mark.parametrize("payload", [b"groq_api_key: \xff\xfe secret-latin1-\xe9\n", b"\xc3\x28 secret\n"])
+def test_a_file_that_is_not_utf8_is_reported_without_its_content(tmp_path, payload):
+    path = tmp_path / "config.yaml"
+    path.write_bytes(payload)
+    with pytest.raises(ConfigError) as caught:
+        Config(path)
+    assert "secret" not in str(caught.value) and caught.value.__cause__ is None
+    assert path.read_bytes() == payload

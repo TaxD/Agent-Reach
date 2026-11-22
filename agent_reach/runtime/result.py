@@ -66,6 +66,15 @@ def _within_budget(items: list) -> tuple:
             first["text"] = first["text"][:MAX_TEXT_CHARS] + " …(truncated)"
         if "raw" in first:
             first["raw"] = _bounded_raw(first["raw"])
+        try:
+            size = len(json.dumps(first, ensure_ascii=False, default=str))
+        except (TypeError, ValueError):
+            size = 0
+        if size > MAX_OUTPUT_CHARS and isinstance(first.get("text"), str):
+            # Escaping can double the size; cut the text by the excess (and a margin) and drop raw.
+            first["text"] = first["text"][:max(0, len(first["text"]) - (size - MAX_OUTPUT_CHARS) - 1024)] + " …(truncated)"
+            if "raw" in first:
+                first["raw"] = {"omitted": "answer exceeded the output budget"}
     for item in items:
         try:
             size = len(json.dumps(item, ensure_ascii=False, default=str))

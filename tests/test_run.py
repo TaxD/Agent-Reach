@@ -20,10 +20,6 @@ def test_output_and_errors_are_returned(monkeypatch):
     assert "bad thing" in caught.value.stderr
 
 
-def test_input_is_written_to_the_child():
-    assert run.run_cmd(_py("import sys; print(sys.stdin.read().upper())"), timeout=20, input_data="abc") == "ABC\n"
-
-
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])
 def test_a_child_that_floods_a_pipe_is_stopped(monkeypatch, stream):
     monkeypatch.setattr(run, "_MAX_OUTPUT_BYTES", 64 * 1024)
@@ -59,3 +55,44 @@ def test_dropped_environment_prefixes_never_reach_the_child(monkeypatch):
     code = "import os; print(sorted(k for k in os.environ if k in ('NODE_OPTIONS','npm_config_registry','KEEP_ME','SET')))"
     out = run.run_cmd(_py(code), timeout=20, drop_env_prefix=("NODE_", "npm_"), env={"SET": "1"})
     assert out.strip() == "['KEEP_ME', 'SET']"
+
+
+def test_a_grandchild_holding_the_output_open_is_not_a_success(tmp_path):
+    """The child exits at once but leaves a descendant that inherited stdout and keeps sleeping."""
+    marker = tmp_path / "grandchild.pid"
+    code = (
+        "import subprocess, sys\n"
+        "p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        f"open({str(marker)!r}, 'w').write(str(p.pid))\n"
+        "print('partial')\n"
+    )
+    started = time.monotonic()
+    with pytest.raises(ReachError) as caught:
+        run.run_cmd(_py(code), timeout=20)
+    assert caught.value.code == "UPSTREAM_BROKEN" and "holding its output open" in caught.value.message
+    assert time.monotonic() - started < 15
+    import os
+    import signal
+
+    pid = int(marker.read_text())
+
+    def alive() -> bool:
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
+    deadline = time.monotonic() + 3  # an orphan is reaped by init shortly after it dies
+    while alive() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    alive = alive()
+    if alive:  # killing the session should have taken it; clean up either way
+        os.kill(pid, signal.SIGKILL)
+    assert not alive, "the descendant that held the pipe is stopped too"
+
+
+def test_run_cmd_no_longer_takes_input():
+    import inspect
+
+    assert "input_data" not in inspect.signature(run.run_cmd).parameters

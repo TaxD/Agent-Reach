@@ -133,6 +133,8 @@ class Config:
             )
         except PrivatePathError as exc:
             raise ConfigSecurityError(str(exc)) from exc
+        except (OSError, UnicodeError):
+            raise ConfigError("The config file could not be read as UTF-8 text") from None
         if payload is None:
             self.data = {}
             return

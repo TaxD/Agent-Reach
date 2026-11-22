@@ -28,6 +28,7 @@ _TARGET_RE = re.compile(
     r"(?:/(?:issues|pull)/(\d+))?/?(?:[?#].*)?$"
 )
 _README_MAX_CHARS = 50_000
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_.-]{1,255}")
 
 _GH_READ_ONLY_ENV = {
     # gh 2.92 creates ~/.local/state/gh/device-id even for `--version` unless
@@ -87,6 +88,11 @@ def _api_get(path: str, timeout: float, accept: str = "application/vnd.github+js
 
         token = Config(read_only=True).get("github_token")
     if token:
+        token = str(token).strip()
+        if not _TOKEN_RE.fullmatch(token):
+            # Never hand a malformed value to the HTTP layer: its error would quote it.
+            raise ReachError(NEED_SETUP, "The configured GitHub token is malformed",
+                             hint="The user sets it again with `agent-reach configure github-token`.")
         headers["Authorization"] = f"Bearer {token}"
     try:
         return http_request(f"{_API}{path}", timeout=timeout, headers=headers, same_origin_redirects=True)
@@ -158,14 +164,14 @@ class GitHubChannel(Channel):
         path = "/search/repositories?" + urlencode({"q": f"{query} is:public", "per_page": limit})
         data = json.loads(get(path, timeout))
         return [_repo_item(r) for r in data.get("items", [])
-                if r.get("private") is False and r.get("visibility", "public") == "public"][:limit]
+                if r.get("private") is False and r.get("visibility") == "public"][:limit]
 
     @staticmethod
     def _read(get, target: str, timeout: float) -> list:
         owner, repo, number = _parse_target(target)
         info = json.loads(get(f"/repos/{owner}/{repo}", timeout / 3))
         if (not isinstance(info, dict) or info.get("private") is not False
-                or info.get("visibility", "public") != "public"):
+                or info.get("visibility") != "public"):
             # Public content only. A token (gh login or github-token) raises rate limits;
             # it is not a way for the agent to read private repositories. Same answer
             # as a missing repository, so existence is not disclosed either.

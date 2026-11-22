@@ -77,3 +77,17 @@ def test_an_oversized_first_item_is_cut_to_the_budget():
     assert len(kept["text"]) <= result.MAX_TEXT_CHARS + 20 and kept["text"].endswith("(truncated)")
     assert "omitted" in kept["raw"]
     assert len(json.dumps(out, ensure_ascii=False)) <= result.MAX_OUTPUT_CHARS + 10_000
+
+
+def test_a_first_item_that_escaping_doubles_still_fits_the_budget():
+    import json
+
+    from agent_reach.runtime import result
+
+    first = {"title": "quotes", "url": None, "author": None, "published_at": None,
+             "text": '"' * result.MAX_TEXT_CHARS, "raw": {"k": "v"}}
+    assert len(json.dumps(first)) > result.MAX_OUTPUT_CHARS, "the test input really is over budget once escaped"
+    out = result.envelope(channel="web", action="read", items=[first])
+    assert len(json.dumps(out, ensure_ascii=False)) <= result.MAX_OUTPUT_CHARS + 4096
+    (item,) = out["items"]
+    assert item["text"].endswith("(truncated)") and "omitted" in item["raw"]

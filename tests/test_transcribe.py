@@ -891,3 +891,95 @@ class TestSubprocessDecoding:
             tr._probe_audio_duration(tmp_path / "audio.m4a")
 
 
+
+
+# --- caller deadline and URL-only sources ------------------------------ #
+
+
+class TestDeadline:
+    def test_every_step_gets_at_most_the_time_that_is_left(self, monkeypatch):
+        seen = {}
+
+        def inner(*args):
+            seen["deadline"] = tr._DEADLINE
+            seen["budget"] = tr._budget(600)
+            return "ok"
+
+        monkeypatch.setattr(tr, "_transcribe", inner)
+        assert tr.transcribe("https://www.youtube.com/watch?v=dQw4w9WgXcQ", timeout=30) == "ok"
+        assert seen["deadline"] is not None and 0 < seen["budget"] <= 30
+        assert tr._DEADLINE is None, "the deadline ends with the call"
+
+    def test_no_timeout_means_no_deadline(self, monkeypatch):
+        monkeypatch.setattr(tr, "_transcribe", lambda *a: str(tr._budget(600)))
+        assert tr.transcribe("x") == "600"
+
+    def test_the_deadline_is_cleared_even_when_transcription_fails(self, monkeypatch):
+        def inner(*args):
+            raise tr.TranscribeError("boom")
+
+        monkeypatch.setattr(tr, "_transcribe", inner)
+        with pytest.raises(tr.TranscribeError):
+            tr.transcribe("x", timeout=5)
+        assert tr._DEADLINE is None
+
+    def test_an_exhausted_deadline_stops_the_next_step(self, monkeypatch):
+        import time
+
+        monkeypatch.setattr(tr, "_DEADLINE", time.monotonic() - 1)
+        monkeypatch.setattr(tr.subprocess, "run", lambda *a, **k: pytest.fail("started a step without time"))
+        with pytest.raises(tr.TranscribeError, match="ran out of time"):
+            tr._run(["ffmpeg", "-version"], timeout=600)
+
+    def test_subprocess_and_upload_timeouts_are_shortened(self, monkeypatch, fake_config, chunk_file):
+        import time
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(tr, "_DEADLINE", time.monotonic() + 7)
+        seen = {}
+        monkeypatch.setattr(tr.subprocess, "run",
+                            lambda *a, **k: seen.setdefault("run", k["timeout"]) and SimpleNamespace(returncode=0))
+        tr._run(["ffmpeg", "-version"], timeout=600)
+        fake_config.set("groq_api_key", "gsk_test")
+
+        def fake_post(url, **kwargs):
+            seen["post"] = kwargs["timeout"]
+            return FakeResponse(200, "text")
+
+        monkeypatch.setattr(tr.requests, "post", fake_post)
+        tr.transcribe_chunk(chunk_file, "groq", config=fake_config, timeout=300)
+        assert 0 < seen["run"] <= 7 and 0 < seen["post"] <= 7
+
+
+def test_url_only_never_reads_a_local_file_of_the_same_name(monkeypatch, fake_config, tmp_path):
+    fake_config.set("groq_api_key", "gsk_test")
+    monkeypatch.chdir(tmp_path)
+    name = "dQw4w9WgXcQ"
+    (tmp_path / name).write_bytes(b"private local audio")
+    downloads = []
+
+    class Stop(Exception):
+        pass
+
+    def fake_download(source, work_dir):
+        downloads.append(source)
+        raise Stop()
+
+    monkeypatch.setattr(tr, "download_audio", fake_download)
+    with pytest.raises(Stop):
+        tr.transcribe(name, config=fake_config, url_only=True)
+    assert downloads == [name]
+
+
+def test_youtube_transcription_passes_its_timeout_and_url_only(monkeypatch):
+    from agent_reach.channels import youtube
+
+    seen = {}
+
+    def fake(url, **kwargs):
+        seen.update(url=url, **kwargs)
+        return "text"
+
+    monkeypatch.setattr(tr, "transcribe", fake)
+    youtube.YouTubeChannel()._whisper_transcribe(target="dQw4w9WgXcQ", timeout=123)
+    assert seen == {"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "timeout": 123, "url_only": True}

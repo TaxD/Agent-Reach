@@ -15,7 +15,8 @@ def test_missing_gh_auth_falls_back_to_public_api_without_login(monkeypatch):
         raise CommandFailed("UPSTREAM_BROKEN", "gh exited", stderr="please run gh auth login")
     monkeypatch.setattr(github, "run_cmd", no_gh)
     monkeypatch.setattr(github, "http_request", lambda *a, **k: json.dumps(
-        {"items": [{"full_name": "owner/repo", "html_url": "https://github.com/owner/repo", "private": False}]}
+        {"items": [{"full_name": "owner/repo", "html_url": "https://github.com/owner/repo", "private": False,
+                   "visibility": "public"}]}
     ).encode())
     out = run_action(github.GitHubChannel(), "search", {"query": "repo", "limit": 1})
     assert out["ok"] and out["backend"] == "github-api" and len(out["items"]) == 1
@@ -48,6 +49,7 @@ def test_github_repository_without_readme_keeps_metadata(monkeypatch, backend):
         'html_url': 'https://github.com/example/code-only',
         'description': 'A repository without a README',
         'private': False,
+        'visibility': 'public',
     }
 
     def get(url, **kwargs):
@@ -81,7 +83,7 @@ def test_github_missing_repo_and_readme_failures_stay_errors(monkeypatch, status
         # A missing repository must not be mistaken for an optional missing README.
         if status == 404 or url.endswith('/readme'):
             raise urllib.error.HTTPError(url, status, 'Denied', headers, None)
-        return json.dumps({'full_name': 'example/code-only', 'private': False}).encode()
+        return json.dumps({'full_name': 'example/code-only', 'private': False, 'visibility': 'public'}).encode()
 
     monkeypatch.setattr(github, 'http_request', get)
     out = run_action(github.GitHubChannel(), 'read', {'target': 'example/code-only'}, only_backend='github-api')
@@ -100,7 +102,7 @@ def test_gh_always_targets_github_com(monkeypatch):
     assert kwargs["env"] == github._GH_READ_ONLY_ENV
 
 
-@pytest.mark.parametrize("visibility", ["internal", "private", "INTERNAL", ""])
+@pytest.mark.parametrize("visibility", ["internal", "private", "INTERNAL", "", None, "Public"])
 def test_github_returns_only_public_visibility(visibility):
     from agent_reach.runtime.result import NOT_FOUND
 
@@ -112,7 +114,41 @@ def test_github_returns_only_public_visibility(visibility):
                                          {"full_name": "a/old", "private": False}]}).encode()
         return json.dumps(repo).encode()
 
-    assert [i["title"] for i in github.GitHubChannel._search(get, "x", 5, 3)] == ["a/open", "a/old"]
+    assert [i["title"] for i in github.GitHubChannel._search(get, "x", 5, 3)] == ["a/open"], (
+        "a result without an explicit public visibility is left out")
     with pytest.raises(ReachError) as err:
         github.GitHubChannel._read(get, "corp/tool", 3)
     assert err.value.code == NOT_FOUND
+
+
+def test_a_repository_without_a_visibility_field_is_not_found():
+    from agent_reach.runtime.result import NOT_FOUND
+
+    def get(path, timeout, accept=""):
+        return json.dumps({"full_name": "a/old", "private": False}).encode()
+
+    with pytest.raises(ReachError) as err:
+        github.GitHubChannel._read(get, "a/old", 3)
+    assert err.value.code == NOT_FOUND
+
+
+@pytest.mark.parametrize("token", ["ghp_ok\r\nX-Injected: 1", "tok en", "https://user:pw@x", "ghp_\u00e9", "a" * 256])
+def test_a_malformed_github_token_is_never_sent_or_shown(monkeypatch, token):
+    from agent_reach.config import Config
+
+    Config().set("github_token", token)
+    monkeypatch.setattr(github, "http_request", lambda *a, **k: pytest.fail("sent a request with a bad token"))
+    with pytest.raises(ReachError) as err:
+        github._api_get("/repos/a/b", 3)
+    assert err.value.code == "NEED_SETUP" and err.value.message == "The configured GitHub token is malformed"
+    assert token not in err.value.message + (err.value.hint or "")
+
+
+def test_a_wellformed_github_token_is_sent_as_bearer(monkeypatch):
+    from agent_reach.config import Config
+
+    Config().set("github_token", "  ghp_Abc_123.x-y  ")
+    seen = {}
+    monkeypatch.setattr(github, "http_request", lambda url, **kw: seen.update(kw) or b"{}")
+    github._api_get("/repos/a/b", 3)
+    assert seen["headers"]["Authorization"] == "Bearer ghp_Abc_123.x-y"

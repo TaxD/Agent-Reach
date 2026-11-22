@@ -116,7 +116,8 @@ def _probe_audio_duration(path: Path) -> float:
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=PROBE_TIMEOUT_SECONDS,
+            timeout=_budget(PROBE_TIMEOUT_SECONDS),
+            cwd=str(Path.home()),
         )
     except subprocess.TimeoutExpired:
         raise TranscribeError(
@@ -150,6 +151,23 @@ def _require_duration_within_budget(path: Path) -> float:
     return duration
 
 
+#: Absolute time.monotonic() by which the current transcription must be done (None = no caller deadline).
+# ponytail: one module-level deadline; the CLI runs one transcription per process.
+_DEADLINE: Optional[float] = None
+
+
+def _budget(seconds: float) -> float:
+    """`seconds`, shortened to what is left of the caller's deadline."""
+    import time
+
+    if _DEADLINE is None:
+        return seconds
+    left = _DEADLINE - time.monotonic()
+    if left <= 0:
+        raise TranscribeError("transcription ran out of time")
+    return min(seconds, left)
+
+
 def _run(cmd: List[str], timeout: int = 600) -> None:
     """Run a subprocess, raising TranscribeError on nonzero exit or timeout.
 
@@ -162,7 +180,7 @@ def _run(cmd: List[str], timeout: int = 600) -> None:
             capture_output=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
+            timeout=_budget(timeout),
             cwd=str(Path.home()),  # never the project the agent happens to be in
         )
     except subprocess.TimeoutExpired:
@@ -386,7 +404,7 @@ def transcribe_chunk(
                 headers={"Authorization": f"Bearer {key}"},
                 files={"file": (chunk.name, fh, "audio/m4a")},
                 data={"model": info["model"], "response_format": "text"},
-                timeout=timeout,
+                timeout=_budget(timeout),
                 allow_redirects=False,  # a redirect would resend the recording to another address
                 stream=True,
             )
@@ -417,6 +435,8 @@ def transcribe(
     out_dir: Optional[Path] = None,
     config: Optional[Config] = None,
     allow_provider_fallback: bool = False,
+    timeout: Optional[float] = None,
+    url_only: bool = False,
 ) -> str:
     """Transcribe a URL or local file path. Returns the joined transcript text.
 
@@ -430,6 +450,18 @@ def transcribe(
         raise TranscribeError(
             "allow_provider_fallback requires provider='auto'"
         )
+    import time
+
+    global _DEADLINE
+    _DEADLINE = time.monotonic() + timeout if timeout is not None else None
+    try:
+        return _transcribe(source, provider, out_dir, config, allow_provider_fallback, url_only)
+    finally:
+        _DEADLINE = None
+
+
+def _transcribe(source: str, provider: str, out_dir: Optional[Path], config: Optional[Config],
+                allow_provider_fallback: bool, url_only: bool) -> str:
     cfg = config or Config()
     candidates = _provider_order(provider)
     configured = [p for p in candidates if _provider_key(p, cfg)]
@@ -444,19 +476,20 @@ def transcribe(
         order = configured[:1]
 
     if out_dir:
-        return _transcribe_in_dir(source, order, cfg, Path(out_dir))
+        return _transcribe_in_dir(source, order, cfg, Path(out_dir), url_only)
 
     from agent_reach.utils.paths import private_temporary_directory
 
     with private_temporary_directory(prefix="transcribe-") as tmp:
-        return _transcribe_in_dir(source, order, cfg, Path(tmp))
+        return _transcribe_in_dir(source, order, cfg, Path(tmp), url_only)
 
 
-def _transcribe_in_dir(source: str, order: List[str], cfg: Config, work_dir: Path) -> str:
+def _transcribe_in_dir(source: str, order: List[str], cfg: Config, work_dir: Path, url_only: bool = False) -> str:
     work_dir.mkdir(parents=True, exist_ok=True)
 
     src_path = Path(source)
-    if src_path.is_file():
+    # url_only: a channel passes a URL; a file of the same name in the working directory must not be picked up.
+    if not url_only and src_path.is_file():
         audio = src_path
     else:
         audio = download_audio(source, work_dir)

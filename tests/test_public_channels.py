@@ -140,15 +140,6 @@ def test_public_unicast_accepts_ordinary_addresses_only():
     assert not _public.is_public_unicast("not-an-ip")
 
 
-def test_a_bare_no_proxy_list_does_not_disable_address_pinning(monkeypatch):
-    import urllib.request
-
-    monkeypatch.setattr(urllib.request, "getproxies", lambda: {"no": "localhost,127.0.0.1"})
-    assert _public._proxy_configured() is False
-    monkeypatch.setattr(urllib.request, "getproxies", lambda: {"https": "http://127.0.0.1:7890"})
-    assert _public._proxy_configured() is True
-
-
 @pytest.mark.parametrize("payload", [
     b'<?xml version="1.0"?><!-- <a --><!DOCTYPE r [<!ENTITY x "y">]><rss><channel><item><title>&x;</title></item></channel></rss>',
     b'<?xml version="1.0"?><?pi <a ?><!DOCTYPE r [<!ENTITY x "y">]><rss><channel><item><title>&x;</title></item></channel></rss>',
@@ -203,7 +194,7 @@ def test_github_never_returns_private_repositories(monkeypatch):
         if path.startswith("/search"):
             assert "is%3Apublic" in path
             return json.dumps({"items": [{"full_name": "me/secret", "private": True},
-                                         {"full_name": "me/open", "private": False}]}).encode()
+                                         {"full_name": "me/open", "private": False, "visibility": "public"}]}).encode()
         return json.dumps({"full_name": "me/secret", "private": True}).encode()
 
     assert [i["title"] for i in github.GitHubChannel._search(get, "x", 5, 3)] == ["me/open"]
@@ -416,68 +407,124 @@ def _proxies(monkeypatch, **values):
     monkeypatch.setattr(urllib.request, "getproxies", urllib.request.getproxies_environment)
 
 
-def test_proxy_use_is_decided_per_request(monkeypatch):
-    _proxies(monkeypatch)
-    assert _public._uses_proxy("https://example.org/feed") is False
-    _proxies(monkeypatch, https_proxy="http://127.0.0.1:7890")
-    assert _public._uses_proxy("https://example.org/feed") is True
-    assert _public._uses_proxy("http://example.org/feed") is False, "no proxy for this scheme"
-    _proxies(monkeypatch, https_proxy="http://127.0.0.1:7890", no_proxy="example.org")
-    assert _public._uses_proxy("https://example.org/feed") is False
-    assert _public._uses_proxy("https://other.example/feed") is True
+class _Wire:
+    """Stands in for the network under fetch_public: records which connection class each hop used."""
+
+    def __init__(self, monkeypatch, answers=None):
+        self.hops = []
+        self.answers = list(answers or [])
+        wire = self
+
+        def do_open(handler, http_class, req, **kwargs):
+            wire.hops.append({"url": req.full_url, "cls": http_class.__name__, "proxied": _public._proxied(req)})
+            return wire._answer(req)
+
+        monkeypatch.setattr(_public._PublicHTTPHandler, "do_open", do_open)
+        monkeypatch.setattr(_public._PublicHTTPSHandler, "do_open", do_open)
+
+    def _answer(self, req):
+        import http.client
+        import io
+        import urllib.request
+
+        status, location = self.answers.pop(0) if self.answers else (200, None)
+        headers = http.client.HTTPMessage()
+        if location:
+            headers["Location"] = location
+        class Body(io.BytesIO):  # like http.client.HTTPResponse: read() after close() is empty
+            def read(self, *a):
+                return b"" if self.closed else super().read(*a)
+
+        resp = urllib.request.addinfourl(Body(RSS if status == 200 else b""), headers, req.full_url, status)
+        resp.msg = "OK" if status == 200 else "Found"
+        return resp
 
 
-def test_a_proxied_request_is_never_redirected_to_another_host():
-    import urllib.request
-
-    class Body:
-        closed = False
-
-        def close(self):
-            self.closed = True
-
-    req = urllib.request.Request("https://example.org/feed")
-    proxied = _public._PublicRedirectHandler(same_host_only=True)
-    assert proxied.redirect_request(req, Body(), 302, "Found", {}, "https://example.org/next") is not None
-    for target in ("https://evil.example/feed", "http://example.org/feed", "https://example.org:8443/feed",
-                   "https://sub.example.org/feed"):
-        with pytest.raises(ReachError):
-            proxied.redirect_request(req, Body(), 302, "Found", {}, target)
-    direct = _public._PublicRedirectHandler()
-    assert direct.redirect_request(req, Body(), 302, "Found", {}, "https://evil.example/feed") is not None
+PINNED = {"_PublicHTTPSConnection", "_PublicHTTPConnection"}
 
 
-def test_get_bytes_through_a_proxy_refuses_a_cross_host_redirect(monkeypatch):
-    import io
-    import urllib.request
+@pytest.mark.parametrize("env, url", [
+    ({"https_proxy": "http://127.0.0.1:7890", "no_proxy": "example.org"}, "https://example.org/feed"),
+    ({"https_proxy": "http://127.0.0.1:7890", "no_proxy": ".example.org"}, "https://api.example.org/feed"),
+    ({"https_proxy": "http://127.0.0.1:7890", "no_proxy": "example.org:443"}, "https://example.org:443/feed"),
+    ({"ALL_PROXY": "http://127.0.0.1:7890"}, "https://example.org/feed"),
+    ({"all_proxy": "socks5://127.0.0.1:1080"}, "http://example.org/feed"),
+    ({"http_proxy": "http://127.0.0.1:7890"}, "https://example.org/feed"),
+    ({}, "https://example.org/feed"),
+])
+def test_hops_that_go_direct_are_always_pinned(monkeypatch, env, url):
+    _proxies(monkeypatch, **env)
+    wire = _Wire(monkeypatch)
+    _public.fetch_public(url, 1, allow_proxy=True)
+    assert [(h["cls"], h["proxied"]) for h in wire.hops] in (
+        [("_PublicHTTPSConnection", False)], [("_PublicHTTPConnection", False)])
 
+
+@pytest.mark.parametrize("env, url, cls", [
+    ({"https_proxy": "http://127.0.0.1:7890"}, "https://example.org/feed", "HTTPSConnection"),
+    ({"https_proxy": "http://127.0.0.1:7890", "no_proxy": "other.example"}, "https://example.org/feed",
+     "HTTPSConnection"),
+    ({"http_proxy": "http://127.0.0.1:7890"}, "http://example.org/feed", "HTTPConnection"),
+])
+def test_only_hops_routed_to_the_proxy_use_an_ordinary_connection(monkeypatch, env, url, cls):
+    _proxies(monkeypatch, **env)
+    wire = _Wire(monkeypatch)
+    _public.fetch_public(url, 1, allow_proxy=True)
+    assert [(h["cls"], h["proxied"]) for h in wire.hops] == [(cls, True)]
+
+
+def test_caller_chosen_urls_never_use_the_proxy(monkeypatch):
+    _proxies(monkeypatch, https_proxy="http://127.0.0.1:7890", http_proxy="http://127.0.0.1:7890")
+    wire = _Wire(monkeypatch)
+    _public.fetch_public("https://example.org/feed", 1)  # rss fetch: allow_proxy=False
+    _public.fetch_public("http://example.org/feed", 1)
+    assert {h["cls"] for h in wire.hops} <= PINNED and not any(h["proxied"] for h in wire.hops)
+
+
+def test_rss_fetch_is_pinned_even_with_a_proxy(monkeypatch):
     _proxies(monkeypatch, https_proxy="http://127.0.0.1:7890")
     seen = []
+    real = _public.fetch_public
 
-    class Redirecting(urllib.request.BaseHandler):
-        handler_order = 100
+    def spy(url, timeout, **kwargs):
+        seen.append(kwargs.get("allow_proxy", False))
+        return real(url, timeout, **kwargs)
 
-        def https_open(self, req):
-            import http.client
+    monkeypatch.setattr("agent_reach.channels.rss.fetch_public", spy)
+    wire = _Wire(monkeypatch)
+    RSSChannel()._fetch(url="https://example.org/feed", limit=5, timeout=1)
+    assert seen == [False] and [h["cls"] for h in wire.hops] == ["_PublicHTTPSConnection"]
 
-            seen.append((req.full_url, req.host))
-            headers = http.client.HTTPMessage()
-            headers["Location"] = "https://evil.example/x"
-            resp = urllib.request.addinfourl(io.BytesIO(b""), headers, req.full_url, 302)
-            resp.msg = "Found"
-            return resp
 
-    real_init = urllib.request.OpenerDirector.__init__
+def test_a_proxied_request_is_never_redirected_to_another_origin(monkeypatch):
+    _proxies(monkeypatch, https_proxy="http://127.0.0.1:7890")
+    for target in ("https://evil.example/x", "http://example.org/x", "https://example.org:8443/x",
+                   "https://sub.example.org/x"):
+        wire = _Wire(monkeypatch, answers=[(302, target)])
+        with pytest.raises(ReachError):
+            _public.fetch_public("https://example.org/feed", 1, allow_proxy=True)
+        assert len(wire.hops) == 1, target
+    wire = _Wire(monkeypatch, answers=[(302, "https://example.org/next")])
+    _public.fetch_public("https://example.org/feed", 1, allow_proxy=True)
+    assert [h["url"] for h in wire.hops] == ["https://example.org/feed", "https://example.org/next"]
 
-    def init(self):
-        real_init(self)
-        self.add_handler(Redirecting())
 
-    monkeypatch.setattr(urllib.request.OpenerDirector, "__init__", init)
-    with pytest.raises(ReachError, match="another host"):
-        _public.get_bytes("https://example.org/feed", 1)
-    assert seen == [("https://example.org/feed", "example.org")]
-    assert all("evil.example" not in url for url, _ in seen)
+def test_a_direct_request_may_follow_a_public_redirect_still_pinned(monkeypatch):
+    _proxies(monkeypatch)
+    wire = _Wire(monkeypatch, answers=[(302, "https://cdn.example.net/feed")])
+    _public.fetch_public("https://example.org/feed", 1, allow_proxy=True)
+    assert [h["cls"] for h in wire.hops] == ["_PublicHTTPSConnection", "_PublicHTTPSConnection"]
+    wire = _Wire(monkeypatch, answers=[(302, "http://127.0.0.1/admin")])
+    with pytest.raises(ReachError):
+        _public.fetch_public("https://example.org/feed", 1, allow_proxy=True)
+    assert len(wire.hops) == 1
+
+
+def test_get_bytes_honours_the_proxy_and_fetch_does_not(monkeypatch):
+    seen = []
+    monkeypatch.setattr(_public, "fetch_public", lambda url, timeout, **kw: seen.append(kw.get("allow_proxy")) or b"{}")
+    _public.get_bytes("https://hn.algolia.com/api/v1/search", 1)
+    assert seen == [True]
 
 
 @pytest.mark.parametrize("env", [{"ALL_PROXY": "http://127.0.0.1:7890"}, {"all_proxy": "socks5://127.0.0.1:1080"}])
@@ -496,3 +543,14 @@ def test_an_all_proxy_setting_does_not_turn_off_address_pinning(monkeypatch, env
     with pytest.raises((ReachError, OSError)):
         _public.get_bytes("https://rebind.example.org/api", 1)
     assert connected == [], "connected to a name that resolves to loopback"
+
+
+def test_a_direct_hop_cannot_redirect_into_the_proxy_to_another_host(monkeypatch):
+    """The bypassed first hop is pinned, but its redirect target is not bypassed, so urllib would send that
+    next hop through the proxy, unpinned, to a host the redirecting site chose. That breaks the rule that a
+    hop which cannot be pinned never leaves the original origin."""
+    _proxies(monkeypatch, https_proxy="http://127.0.0.1:7890", no_proxy="example.org")
+    wire = _Wire(monkeypatch, answers=[(302, "https://internal.example.net/admin")])
+    with pytest.raises(ReachError):
+        _public.fetch_public("https://example.org/feed", 1, allow_proxy=True)
+    assert [h["proxied"] for h in wire.hops] == [False]

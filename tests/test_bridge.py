@@ -190,7 +190,9 @@ def test_status_is_signed_and_its_answer_must_be_authenticated(token, monkeypatc
                        token, r.get_header("X-opencli-challenge"), 200, body)}),
                    lambda r: _Answer(200, body, {"X-OpenCLI-Proof": _response_proof(token, "f" * 32, 200, body)})):
         _fake_opener(monkeypatch, forged)
-        assert bridge.status() == {}
+        with pytest.raises(ReachError) as caught:
+            bridge.status()
+        assert caught.value.code == "NEED_SETUP", "a proven daemon with an unauthenticated answer is not 'nothing'"
 
 
 def test_status_when_nothing_listens_is_empty(token, monkeypatch):
@@ -216,7 +218,43 @@ def test_an_oversized_daemon_answer_is_refused(token, monkeypatch):
     _fake_opener(monkeypatch, huge)
     with pytest.raises(ValueError):
         bridge._signed_get("/status")
-    assert bridge.status() == {}
+    with pytest.raises(ReachError) as caught:
+        bridge.status()
+    assert caught.value.code == "NEED_SETUP"
+
+
+def test_an_unclear_port_check_is_not_nothing_listening(monkeypatch):
+    import socket
+
+    def refused(address, timeout=None):
+        raise ConnectionRefusedError()
+
+    monkeypatch.setattr(socket, "create_connection", refused)
+    assert bridge._something_listens() is False
+    for error in (socket.timeout("timed out"), PermissionError("denied"), OSError("unreachable")):
+        def fail(address, timeout=None, e=error):
+            raise e
+
+        monkeypatch.setattr(socket, "create_connection", fail)
+        with pytest.raises(ReachError) as caught:
+            bridge._something_listens()
+        assert caught.value.code == "NEED_SETUP"
+
+
+def test_start_keeps_waiting_while_its_daemon_is_not_ready_yet(token, monkeypatch):
+    proc = FakeProc()
+    monkeypatch.setattr(bridge.subprocess, "Popen", lambda argv, **kw: proc)
+    monkeypatch.setattr(bridge.time, "sleep", lambda s: None)
+    answers = iter([{}, "not ready", "not ready", {"ok": True, "daemonVersion": "1.8.7", "pid": proc.pid}])
+
+    def status():
+        answer = next(answers)
+        if answer == "not ready":
+            raise ReachError("NEED_SETUP", "The OpenCLI daemon did not return an authenticated status")
+        return answer
+
+    monkeypatch.setattr(bridge, "status", status)
+    assert REAL_START() is proc and proc.events == []
 
 
 def _installed_opencli(monkeypatch, version):
@@ -359,6 +397,9 @@ def test_start_stops_its_child_when_the_status_check_fails_during_startup(token,
         raise ReachError("NEED_SETUP", bridge._FOREIGN[0], hint=bridge._FOREIGN[1])
 
     monkeypatch.setattr(bridge, "status", status)
+    clock = iter(range(0, 1000))
+    monkeypatch.setattr(bridge.time, "monotonic", lambda: float(next(clock)))
+    monkeypatch.setattr(bridge.time, "sleep", lambda s: None)
     with pytest.raises(ReachError):
         REAL_START()
     assert proc.events and proc.events[0] == "terminate", "the child daemon is stopped"

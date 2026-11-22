@@ -21,7 +21,8 @@ from agent_reach.utils.paths import private_temporary_directory
 
 from .base import Action, Channel, Param
 
-_VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
+_VIDEO_ID_RE = re.compile(r"[A-Za-z0-9_-]{11}")
+_LANG_RE = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8}){0,2}")
 _VTT_TIME_RE = re.compile(
     r"^(?:\d{2,}:)?\d{2}:\d{2}\.\d{3}[ \t]+-->[ \t]+"
     r"(?:\d{2,}:)?\d{2}:\d{2}\.\d{3}(?:[ \t]|$)"
@@ -69,7 +70,7 @@ def _video_id(target: str) -> str:
     from urllib.parse import parse_qs, urlsplit
 
     t = str(target).strip()
-    if _VIDEO_ID_RE.match(t):
+    if _VIDEO_ID_RE.fullmatch(t):
         return t
     try:
         parts = urlsplit(t if "://" in t else f"https://{t}")
@@ -87,7 +88,7 @@ def _video_id(target: str) -> str:
             else:
                 m = _ID_IN_PATH_RE.match(parts.path)
                 found = m.group(1) if m else None
-    if not found or not _VIDEO_ID_RE.match(found):
+    if not found or not _VIDEO_ID_RE.fullmatch(found):
         raise ReachError(BAD_INPUT, "target must be an 11-character video id or a plain YouTube video link "
                                     "(watch?v=, youtu.be/, shorts/, embed/, live/)")
     return found
@@ -240,6 +241,11 @@ class YouTubeChannel(Channel):
     def _ytdlp_subtitle(self, *, target: str, lang: str, timeout: float) -> list:
         url = _video_url(target)
         wanted = [x.strip() for x in lang.split(",") if x.strip()]
+        # Literal language tags only, and few of them: yt-dlp would treat anything else as a
+        # pattern ("all", regexes) and download every matching track.
+        if (not wanted or len(wanted) > 4 or not all(_LANG_RE.fullmatch(x) for x in wanted)
+                or any(x.lower() == "all" for x in wanted)):  # yt-dlp reads "all" as every language
+            raise ReachError(BAD_INPUT, "lang must be up to 4 comma-separated language tags such as ko,en")
         with private_temporary_directory(prefix="agent-reach-subs-") as tmp:
             out = _run_ytdlp(
                 [
@@ -274,7 +280,7 @@ class YouTubeChannel(Channel):
 
         url = _video_url(target)
         try:
-            text = _transcribe(url)
+            text = _transcribe(url, timeout=timeout, url_only=True)
         except NoProviderConfigured:
             raise ReachError(
                 "NEED_SETUP", "no Whisper API key configured",

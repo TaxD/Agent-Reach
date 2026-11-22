@@ -77,7 +77,9 @@ def _mgmt(action: str, fn, *args, **kwargs) -> int:
         result, error = fn(*args, **kwargs), None
     except ReachError as err:
         result = None
-        error = {"code": err.code, "message": err.message, "hint": err.hint or DEFAULT_HINTS.get(err.code, "")}
+        from .result import _clean
+
+        error = {"code": err.code, "message": _clean(err.message), "hint": err.hint or DEFAULT_HINTS.get(err.code, "")}
     return _emit({"schema_version": SCHEMA_VERSION, "ok": error is None, "action": action,
                   "result": result, "error": error})
 
@@ -363,6 +365,8 @@ def _apply_saved_proxy() -> None:
     def exclude_loopback() -> None:
         bypass = list(dict.fromkeys(x.strip() for key in ("NO_PROXY", "no_proxy")
                                    for x in os.environ.get(key, "").split(",") if x.strip()))
+        if "*" in bypass:
+            return  # "bypass everything" already covers loopback; urllib honours "*" only when it stands alone
         for host in ("localhost", "127.0.0.1", "::1"):
             if host not in bypass:
                 bypass.append(host)

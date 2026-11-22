@@ -612,3 +612,23 @@ def test_a_config_type_error_is_reported_without_its_content(capsys):
     assert code == 1 and out["error"]["code"] == "NEED_SETUP"
     assert "secret" not in json.dumps(out)
     assert path.read_text() == "groq_api_key: !!bool gsk_secret_value_123\n", "the file is left as it was"
+
+
+def test_a_bypass_everything_no_proxy_is_kept_as_is(monkeypatch):
+    environ = _clear_proxy_env(monkeypatch)
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+    monkeypatch.setenv("NO_PROXY", "*")
+    unified._apply_saved_proxy()
+    assert environ["NO_PROXY"] == "*", "urllib honours '*' only when it stands alone"
+
+
+def test_management_errors_are_scrubbed(monkeypatch, capsys):
+    from agent_reach.runtime import manage
+
+    def fail():
+        raise ReachError("UPSTREAM_BROKEN", "install failed via https://alice:hunter2@proxy.example/?token=abc " + "z" * 2000)
+
+    monkeypatch.setattr(manage, "doctor", fail)
+    code, out = _run(capsys, ["doctor"])
+    assert code == 1 and "hunter2" not in out["error"]["message"] and "abc" not in out["error"]["message"]
+    assert len(out["error"]["message"]) <= 500

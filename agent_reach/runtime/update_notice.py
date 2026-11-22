@@ -38,7 +38,7 @@ def fetch_latest(timeout: float = FETCH_TIMEOUT) -> dict:
     req = urllib.request.Request(f"https://api.github.com/repos/{REPO}/releases/latest",
                                  headers={"User-Agent": "agent-reach", "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        rel = json.loads(resp.read())
+        rel = json.loads(resp.read(512 * 1024))
     return {"latest": str(rel.get("tag_name", "")).lstrip("v"), "notes": (rel.get("body") or "")[:NOTES_MAX]}
 
 

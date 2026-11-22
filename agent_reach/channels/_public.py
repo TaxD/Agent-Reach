@@ -57,11 +57,7 @@ def get_bytes(url: str, timeout: float, *, max_bytes: int = MAX_JSON_BYTES, acce
     """GET a URL on a host the channel hard-codes. Never pass caller-chosen hosts here."""
     if not url.startswith("https://"):
         raise ReachError(BAD_INPUT, "only HTTPS endpoints are allowed")
-    # Direct connection: every hop is pinned to public addresses, so an open redirect
-    # on a trusted site cannot point this machine at its own network.
-    # ponytail: behind a proxy the proxy resolves names, so hops are validated by
-    # their literal host only; address pinning there needs a CONNECT-aware client.
-    return fetch_public(url, timeout, max_bytes=max_bytes, accept=accept, via_proxy=_uses_proxy(url))
+    return fetch_public(url, timeout, max_bytes=max_bytes, accept=accept, allow_proxy=True)
 
 
 def get_json(url: str, timeout: float) -> Any:
@@ -303,72 +299,69 @@ class _PublicHTTPSConnection(http.client.HTTPSConnection):
         self._create_connection = _connect_public
 
 
+def _proxied(req) -> bool:
+    """urllib decided to send this exact request through a proxy (set by its ProxyHandler)."""
+    return bool(getattr(req, "_tunnel_host", None)) or req.has_proxy()
+
+
 class _PublicHTTPHandler(urllib.request.HTTPHandler):
     def http_open(self, req):
-        return self.do_open(_PublicHTTPConnection, req)
+        # A hop that goes direct is always pinned to public addresses. Only a hop urllib
+        # itself routed to the proxy uses an ordinary connection (to the proxy).
+        return self.do_open(http.client.HTTPConnection if _proxied(req) else _PublicHTTPConnection, req)
 
 
 class _PublicHTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, req):
-        return self.do_open(_PublicHTTPSConnection, req, context=ssl.create_default_context())
+        return self.do_open(http.client.HTTPSConnection if _proxied(req) else _PublicHTTPSConnection, req,
+                            context=ssl.create_default_context())
 
 
 class _PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
     max_redirections = 5
 
-    def __init__(self, same_host_only: bool = False):
-        self._same_host_only = same_host_only
+    def __init__(self, allow_proxy: bool = False):
+        self._allow_proxy = allow_proxy
+
+    def _next_hop_proxied(self, newurl: str) -> bool:
+        """urllib would route the redirect target through the proxy (same test its ProxyHandler applies)."""
+        if not self._allow_proxy:
+            return False
+        parts = urlsplit(newurl)
+        return bool(urllib.request.getproxies().get(parts.scheme)) and not urllib.request.proxy_bypass(parts.netloc)
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        fp.close()  # never buffer a redirect body, whether or not the hop is accepted
-        _public_url(newurl)  # every hop is re-validated; non-http(s) schemes fail here
-        if self._same_host_only:
-            # Through a proxy the next hop cannot be pinned, and urllib would carry the
-            # proxy credential along. So a proxied request may only be redirected within
-            # its own scheme and host.
-            old, new = urlsplit(req.full_url), urlsplit(newurl)
-            if (old.scheme, old.hostname, old.port) != (new.scheme, new.hostname, new.port):
-                fp.close()
-                raise ReachError(UPSTREAM_BROKEN, "a proxied request was redirected to another host; refused")
-        # urllib reads the whole redirect body right after this call. Close it first
+        # urllib would read the whole redirect body right after this call. Close it first
         # (read() on a closed response is empty) so a huge 3xx body cannot fill memory.
         fp.close()
+        _public_url(newurl)  # every hop is re-validated; non-http(s) schemes fail here
+        if _proxied(req) or self._next_hop_proxied(newurl):
+            # A hop through the proxy cannot be pinned, and urllib would carry the proxy
+            # credential along. So a redirect that starts from, or leads into, the proxy
+            # may only stay within its own origin.
+            old, new = urlsplit(req.full_url), urlsplit(newurl)
+            if (old.scheme, old.hostname, old.port) != (new.scheme, new.hostname, new.port):
+                raise ReachError(UPSTREAM_BROKEN, "a proxied request was redirected to another host; refused")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 _FEED_ACCEPT = "application/atom+xml, application/rss+xml, application/xml, text/xml"
 
 
-def _proxy_configured() -> bool:
-    """An outbound proxy for http(s) is set (a bare no_proxy list does not count)."""
-    return any(urllib.request.getproxies().get(scheme) for scheme in ("https", "http"))
-
-
-def _uses_proxy(url: str) -> bool:
-    """This exact request would go through a proxy: one is set for its scheme and its host is not bypassed."""
-    parts = urlsplit(url)
-    # Only a proxy for this exact scheme counts. urllib does not route http(s) through an
-    # ALL_PROXY entry, so treating that as "proxied" would send the request direct and unpinned.
-    if not urllib.request.getproxies().get(parts.scheme):
-        return False
-    return not urllib.request.proxy_bypass(parts.hostname or "")
-
-
 def fetch_public(url: str, timeout: float, *, max_bytes: int = MAX_FEED_BYTES, accept: str = _FEED_ACCEPT,
-                 via_proxy: bool = False) -> bytes:
-    """GET a caller-chosen URL without reaching loopback, private or link-local networks.
+                 allow_proxy: bool = False) -> bytes:
+    """GET a URL without reaching loopback, private or link-local networks.
 
-    ponytail: connects directly and ignores a configured proxy, because address
-    pinning is impossible through a proxy that resolves names itself. Add a
-    proxy-aware path only if users behind a mandatory proxy need generic feeds.
+    Every hop that connects directly is pinned to the public address that was checked.
+    With `allow_proxy` (fixed-host channels) the configured proxy is honoured exactly as
+    urllib decides per hop; such a hop cannot be pinned, so it may not leave its origin.
+    Caller-chosen URLs (`rss fetch`) never use a proxy.
     """
     clean = _public_url(url)
     opener = urllib.request.OpenerDirector()
-    transport = ((urllib.request.ProxyHandler(), urllib.request.HTTPHandler(),
-                  urllib.request.HTTPSHandler(context=ssl.create_default_context())) if via_proxy
-                 else (urllib.request.ProxyHandler({}), _PublicHTTPHandler(), _PublicHTTPSHandler()))
-    for handler in (*transport, _PublicRedirectHandler(same_host_only=via_proxy), urllib.request.HTTPDefaultErrorHandler(),
-                    urllib.request.HTTPErrorProcessor()):
+    proxy = urllib.request.ProxyHandler() if allow_proxy else urllib.request.ProxyHandler({})
+    for handler in (proxy, _PublicHTTPHandler(), _PublicHTTPSHandler(), _PublicRedirectHandler(allow_proxy),
+                    urllib.request.HTTPDefaultErrorHandler(), urllib.request.HTTPErrorProcessor()):
         opener.add_handler(handler)
     req = urllib.request.Request(clean, headers={"User-Agent": _USER_AGENT, "Accept": accept})
     with opener.open(req, timeout=max(timeout, 0.1)) as resp:
