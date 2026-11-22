@@ -1,102 +1,145 @@
-"""Official OpenCLI Bridge, supervised only while the dedicated browser is open.
+"""The OpenCLI daemon of the hardened fork, run only while the dedicated browser is open.
 
-No upstream edits. Existing compatible user processes are borrowed, never killed.
+The fork's daemon accepts only requests signed with a secret token (HMAC-SHA256
+over method, path, time, nonce and body) and proves to its clients that it
+knows the token too. So other programs on this machine can neither drive the
+browser through 127.0.0.1:19825 nor pose as the daemon. The token is never
+transmitted, and never put in a command line or an environment value; only the
+path of its 0600 file is passed around.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import os
+import secrets
 import subprocess
 import time
 import urllib.request
-from pathlib import Path
 
-from agent_reach.utils.process import windows_hidden_kwargs
+from agent_reach.utils.paths import read_small_text_no_follow
 
 from . import tools
 from .result import NEED_SETUP, ReachError
 
 URL = "http://127.0.0.1:19825"
+_FOREIGN = ("Another OpenCLI daemon is already using port 19825; left it unchanged",
+            "Ask the user to stop their own OpenCLI (`opencli daemon stop`), then retry. Reach will not stop it.")
+
+
+def env() -> dict:
+    """Environment that points the OpenCLI CLI and daemon at this machine's token file."""
+    from . import browser
+
+    return {"OPENCLI_DAEMON_TOKEN_FILE": str(browser.ensure_token())}
+
+
+def _token() -> bytes:
+    from . import browser
+
+    return (read_small_text_no_follow(browser.ensure_token(), max_bytes=4096) or "").strip().encode("utf-8")
+
+
+def _open(path: str, headers: dict):
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # loopback: never proxy
+    with opener.open(urllib.request.Request(URL + path, headers={"X-OpenCLI": "1", **headers}), timeout=2) as response:
+        return json.loads(response.read(256 * 1024))
+
+
+def signature(method: str, path: str, body: bytes = b"") -> str:
+    """The fork's request signature. The token signs the request and is never transmitted."""
+    ts, nonce = str(int(time.time() * 1000)), secrets.token_hex(16)
+    message = "\n".join([method.upper(), path, ts, nonce, hashlib.sha256(body).hexdigest()])
+    sig = hmac.new(_token(), message.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"OpenCLI-HMAC ts={ts};nonce={nonce};sig={sig}"
+
+
+def daemon_is_ours() -> bool:
+    """Whatever listens on the port proves it knows our token (so it is our daemon, not a squatter)."""
+    nonce = secrets.token_hex(16)
+    try:
+        reply = _open("/ping?nonce=" + nonce, {})
+    except (OSError, ValueError):
+        return False
+    expected = hmac.new(_token(), ("opencli-daemon-proof\n" + nonce).encode("utf-8"), hashlib.sha256).hexdigest()
+    proof = reply.get("proof") if isinstance(reply, dict) else None
+    return isinstance(proof, str) and hmac.compare_digest(proof, expected)
+
+
+def _something_listens() -> bool:
+    try:
+        return bool(_open("/ping", {}))
+    except (OSError, ValueError):
+        return False
 
 
 def status() -> dict:
-    request = urllib.request.Request(URL + "/status", headers={"X-OpenCLI": "1"})
+    """The daemon's status when it is ours; {} when nothing answers.
+
+    A listener that cannot prove it knows our token is someone else's program on
+    the port. That is reported and never worked around, and nothing is sent to it.
+    """
+    if not daemon_is_ours():
+        if _something_listens():
+            raise ReachError(NEED_SETUP, _FOREIGN[0], hint=_FOREIGN[1])
+        return {}
     try:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(request, timeout=1) as response:
-            value = json.loads(response.read(128 * 1024))
-        return value if isinstance(value, dict) and value.get("ok") else {}
+        value = _open("/status", {"Authorization": signature("GET", "/status")})
     except (OSError, ValueError):
         return {}
+    return value if isinstance(value, dict) and value.get("ok") else {}
 
 
 def launch_spec() -> tuple[list[str], str]:
-    exe = tools.resolve("opencli")
     node = tools.resolve("node")
-    if not exe or not node:
-        raise ReachError(NEED_SETUP, "Run agent-reach add CHANNEL to install Node and OpenCLI")
-    resolved = Path(exe).resolve()
-    # npm on Windows uses a .cmd shim beside node_modules; POSIX uses a symlink.
-    candidates = [*resolved.parents, Path(exe).parent / "node_modules" / "@jackwener" / "opencli"]
-    for root in candidates:
-        daemon = root / "dist" / "src" / "daemon.js"
-        package = root / "package.json"
-        if daemon.is_file() and package.is_file():
-            return [node, str(daemon)], str(json.loads(package.read_text("utf-8"))["version"])
-    raise ReachError(NEED_SETUP, "Unsupported OpenCLI package layout; reinstall official OpenCLI")
-
-
-def require_compatible() -> dict:
-    """Do not let upstream CLI auto-restart an unrelated older daemon."""
-    _, version = launch_spec()
-    current = status()
-    if current and current.get("daemonVersion") != version:
-        raise ReachError(NEED_SETUP, "An OpenCLI Bridge of another version is running; left it unchanged",
-                         hint="Close that OpenCLI session yourself, then retry. Reach will not restart it.")
-    return current
+    root = tools.opencli_root()
+    daemon, package = root / "dist" / "src" / "daemon.js", root / "package.json"
+    if not node or not daemon.is_file() or not package.is_file():
+        raise ReachError(NEED_SETUP, "Run agent-reach add CHANNEL to install the pinned OpenCLI")
+    return [node, str(daemon)], str(json.loads(package.read_text("utf-8"))["version"])
 
 
 def require_running() -> dict:
-    """Distinguish an unavailable Bridge from a site with no saved cookies."""
-    current = require_compatible()
+    """Our daemon, at the pinned version; raises when it is missing or is another build."""
+    _, version = launch_spec()
+    current = status()
     if not current:
-        raise ReachError(NEED_SETUP, "OpenCLI Bridge is not running; the site login could not be inspected",
-                         hint="Run agent-reach browser setup to reconnect the Bridge, then retry.")
+        raise ReachError(NEED_SETUP, "The OpenCLI daemon is not running", hint="Retry the action; the browser restarts it.")
+    if current.get("daemonVersion") != version:
+        raise ReachError(NEED_SETUP, _FOREIGN[0], hint=_FOREIGN[1])
     return current
 
 
 def start():
-    """Return a child handle only when Reach started this process."""
-    argv, _ = launch_spec()
-    if require_compatible():
-        return None
-    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, **windows_hidden_kwargs())
-    deadline = time.monotonic() + 10
+    """Start our daemon as a child of the watcher; returns its handle."""
+    argv, version = launch_spec()
+    if status():
+        raise ReachError(NEED_SETUP, _FOREIGN[0], hint=_FOREIGN[1])
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            env={**os.environ, **env()}, cwd=os.path.expanduser("~"))
+    deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        current = require_compatible()
+        current = status()
         if current:
-            if current.get("pid") == proc.pid:
+            if current.get("pid") == proc.pid and current.get("daemonVersion") == version:
                 return proc
-            proc.wait(timeout=5)  # another starter won the port; never claim its process
-            return None
+            break  # something else answers with our token: refuse rather than adopt it
         if proc.poll() is not None:
             break
         time.sleep(0.1)
-    proc.terminate()
-    proc.wait(timeout=5)
-    raise ReachError(NEED_SETUP, "OpenCLI Bridge could not start alongside the dedicated browser")
+    close(proc)
+    raise ReachError(NEED_SETUP, "The OpenCLI daemon could not start alongside the dedicated browser",
+                     hint="Port 19825 may be in use by another program.")
 
 
 def close(proc) -> None:
-    """Reap only our child, unconditionally bounded to the dedicated browser."""
-    if proc is None:
+    """Stop only the child this process started."""
+    if proc is None or proc.poll() is not None:
         return
-    # Existing user daemons never have a Popen handle here. Other clients may
-    # reconnect through upstream after our browser-scoped child exits.
-    if proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)

@@ -17,8 +17,8 @@ _REDDIT_LOGIN_HINT = (
 )
 
 
-def _reddit(args, timeout: float) -> list:
-    items = opencli_items(opencli_call("reddit", list(args), timeout=timeout, login_hint=_REDDIT_LOGIN_HINT))
+def _reddit(command: str, values, timeout: float, limit=None) -> list:
+    items = opencli_items(opencli_call("reddit", command, values, limit=limit, timeout=timeout, login_hint=_REDDIT_LOGIN_HINT))
     if not items:
         raise ReachError(UPSTREAM_BROKEN, "OpenCLI finished but returned no items")
     return items
@@ -79,14 +79,14 @@ class RedditChannel(Channel):
     # ── unified entry backends ──
 
     def _opencli_search(self, *, query: str, limit: int, timeout: float) -> list:
-        return _reddit(["search", query, "--limit", str(limit)], timeout)[:limit]
+        return _reddit("search", [query], timeout, limit)[:limit]
 
 
     def _opencli_read(self, *, target: str, timeout: float) -> list:
         t = str(target).strip()
         if not (self.can_handle(t) or t.isalnum()):
             raise ReachError(BAD_INPUT, "target must be a reddit.com post link or post id")
-        items = _reddit(["read", t, "--limit", "20"], timeout)
+        items = _reddit("read", [t], timeout, 20)
         post, comments = items[0], items[1:]
         if comments:
             lines = [post["text"] or ""] + [f"\n@{c['author'] or ''}: {c['text'] or ''}" for c in comments]
@@ -95,4 +95,4 @@ class RedditChannel(Channel):
         return [post]
 
     def _opencli_subreddit(self, *, name: str, limit: int, timeout: float) -> list:
-        return _reddit(["subreddit", name.removeprefix("r/"), "--limit", str(limit)], timeout)[:limit]
+        return _reddit("subreddit", [name.removeprefix("r/")], timeout, limit)[:limit]

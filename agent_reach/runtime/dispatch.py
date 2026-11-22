@@ -245,6 +245,11 @@ def run_action(
                 raise ReachError(BAD_INPUT, "This input has no public web route; use a full supported URL")
         # Browser queries wait in line: a few per site and overall share the browser at once.
         browser_action = any(b[0] == "opencli" for b in action.backends)
+        if browser_action and not _channel_added(channel):
+            # A channel that is not turned on never starts the browser, installs anything or touches a login.
+            raise ReachError(NEED_SETUP, f"{channel.name} site actions are not turned on",
+                             hint=f"They use the user's own login in a visible dedicated browser. Only if the user asks for "
+                                  f"that, run `agent-reach add {channel.name}`; otherwise report the public results.")
         lock = query_slot(channel.name, clock) if browser_action else nullcontext()
         with lock:
             limited = cooldown(channel.name)

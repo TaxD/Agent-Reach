@@ -6,7 +6,7 @@ import time
 from contextlib import ExitStack, contextmanager
 from typing import Iterator, List, Optional
 
-from .result import NEED_SETUP, ReachError
+from .result import ReachError
 
 #: Reads of one site that may run at once in the shared browser (same account; keeps risk control calm).
 SITE_SLOTS = 2
@@ -31,17 +31,14 @@ def setup_problems(channel: str):
 
 
 def environment(channel: str):
-    from . import browser, session_reuse
-    session_reuse.prepare(channel)
-    profile = browser.bound_context()
-    if not profile:
-        raise ReachError(NEED_SETUP, "OpenCLI has not connected to the dedicated browser")
-    from . import bridge
-    if not bridge.require_compatible():
-        raise ReachError(NEED_SETUP, "The dedicated browser Bridge disconnected; reopen the Reach browser")
+    """Environment for one OpenCLI command: our browser profile and our daemon token file."""
+    from . import bridge, browser
+
+    profile = browser.ensure_running()
+    bridge.require_running()
     browser.touch()
     return {"OPENCLI_PROFILE": profile, "OPENCLI_WINDOW": "background",
-            "OPENCLI_CDP_ENDPOINT": "", "OPENCLI_CDP_TARGET": ""}
+            "OPENCLI_CDP_ENDPOINT": "", "OPENCLI_CDP_TARGET": "", **bridge.env()}
 
 
 # One OS file lock per name: nonblocking `execution_lock`, or `wait_lock` that

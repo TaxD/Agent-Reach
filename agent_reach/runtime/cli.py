@@ -17,13 +17,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 from typing import Dict, List, Optional, Sequence, cast
 
 from agent_reach.channels import get_all_channels
 from agent_reach.channels.base import Action, Channel
-from agent_reach.utils.process import utf8_subprocess_env
 
 from . import browser
 from .dispatch import DEFAULT_TIMEOUT, find_action, run_action
@@ -32,18 +30,13 @@ from .result import (
     DEFAULT_HINTS,
     NEED_SETUP,
     SCHEMA_VERSION,
-    UPSTREAM_BROKEN,
     ReachError,
     envelope,
 )
-from .sessions import clear_session, has_login_state, import_legacy_state, session_env
 
 _MANAGEMENT = (
     "setup", "add", "remove", "update", "doctor", "uninstall", "configure", "version",
 )
-
-#: Budget for rebuilding a session after a native login exited 0 with no credential.
-_RECOVER_TIMEOUT = 30.0
 
 HELP = """agent-reach — AI 에이전트를 위한 인터넷 접근 도구 (모든 출력은 JSON)
 
@@ -59,14 +52,12 @@ HELP = """agent-reach — AI 에이전트를 위한 인터넷 접근 도구 (모
   agent-reach add <channel>               채널이 필요로 하는 도구 설치와 브라우저 준비
   agent-reach remove <channel>            채널과 그 채널만 사용하던 도구 제거
   agent-reach login|logout <channel>      로그인(사용자가 직접 수행) / 로그인 정보 삭제
-  agent-reach login <channel> --import-existing   다른 브라우저의 해당 사이트 로그인을 명시적으로 가져오기
-  agent-reach browser setup|status|stop   헤드리스 전용 브라우저. 로그인할 때만 창을 엽니다
-  agent-reach browser profiles|use ID     로그인을 가져올 로컬 브라우저 프로필 선택
+  agent-reach browser setup|status|stop   전용 브라우저(항상 창이 보이며, 네트워크 포트를 열지 않음)
   agent-reach skill [link|unlink <dir>]   에이전트 스킬 위치 확인, 다른 AI에 연결하거나 연결 해제
   agent-reach doctor [--text]             채널 상태와 설치된 도구 버전 (네트워크 사용 안 함)
   agent-reach check [channel] [--text]    채널 실측. --search는 검색만 실측
   agent-reach update [--check]            Agent Reach, 추가된 채널의 도구, 스킬 갱신
-  agent-reach configure <key> [value]     groq-key | openai-key | proxy | github-token | browser-port
+  agent-reach configure <key> [value]     groq-key | openai-key | proxy | github-token
   agent-reach uninstall [--dry-run]       Agent Reach가 설치한 모든 것 제거
 """
 
@@ -311,8 +302,6 @@ def _cmd_management(head: str, args: Sequence[str]) -> int:
         parser.add_argument("--text", action="store_true")
     elif head in ("add", "remove"):
         parser.add_argument("channel")
-        if head == "add":
-            parser.add_argument("--allow-upgrade", action="store_true")
     elif head == "update":
         parser.add_argument("--check", action="store_true")
         parser.add_argument("--sync-only", action="store_true")
@@ -342,7 +331,7 @@ def _cmd_management(head: str, args: Sequence[str]) -> int:
             return 0 if all(row['ok'] for row in result['default_channels']) else 1
         return _mgmt(head, manage.setup)
     if head == "add":
-        return _mgmt(head, manage.add, ns.channel, allow_upgrade=ns.allow_upgrade)
+        return _mgmt(head, manage.add, ns.channel)
     if head == "remove":
         return _mgmt(head, manage.remove, ns.channel)
     if head == "update":
@@ -391,155 +380,77 @@ def _apply_saved_proxy() -> None:
 
 def _login_info(ch: Channel):
     if ch.login_url:
-        return {"via": "browser", "logged_in": None, "command": f"agent-reach login {ch.name}"}
-    if ch.session:
-        return {"via": "session", "logged_in": has_login_state(ch.session), "command": f"agent-reach login {ch.name}"}
+        return {"via": "browser", "command": f"agent-reach login {ch.name}"}
     return None
 
 
-def _login_channel(cmd: str, args: Sequence[str]):
+def _login_channel(cmd: str, args: Sequence[str]) -> Channel:
     parser = _Parser(prog=cmd, add_help=False)
     parser.add_argument("channel")
-    if cmd == "login":
-        parser.add_argument("--import-existing", action="store_true")
-        parser.add_argument("--sync", action="store_true")
     ns = parser.parse_args(list(args))
     ch = _channel(ns.channel)
     if ch is None:
         raise _ArgError(f"unknown channel: {ns.channel}")
-    if cmd == "logout" and not (ch.session or ch.logout_keys or ch.login_url):
-        hint = " Log out in the Agent Reach browser window instead." if ch.login_url else ""
-        raise _ArgError(f"{ch.name} has no login state managed by Agent Reach.{hint}")
-    if cmd == "login" and not (ch.session or ch.login_url):
-        raise _ArgError(f"{ch.name} has no login managed by Agent Reach")
-    return ch, ns
+    if not ch.login_url:
+        raise _ArgError(f"{ch.name} has no login; it reads public data only")
+    return ch
 
 
 def _cmd_login(args: Sequence[str]) -> int:
+    """Open the channel's login page in the visible dedicated browser. The user logs in; nothing is typed for them."""
     try:
-        ch, ns = _login_channel("login", args)
+        ch = _login_channel("login", args)
     except _ArgError as exc:
         return _bad_input(None, "login", str(exc))
-    if ns.import_existing and ch.login_url:
-        from . import session_reuse
-        return _mgmt("reuse login", session_reuse.prepare, ch.name, force=True)
-    if ns.import_existing and ch.session:
-        copied = import_legacy_state(ch.session, ch.legacy_state)
-        if copied:
-            return _emit(envelope(channel=ch.name, action="login", backend=ch.session,
-                                  items=[{"imported": copied}]))
-    if ch.login_url and not ns.sync:
-        try:
-            from . import manage
-            manage.add(ch.name)
-            from .browser_binding import exclusive_browser
-            with exclusive_browser():  # opening the window may restart the browser
-                browser.start(ch.login_url)
-            from . import state
-            state.mutate(lambda data: data.setdefault("session_reuse", {}).__setitem__(ch.name, {"source": "manual", "at": state.now()}))
-        except ReachError as err:
-            return _emit(envelope(channel=ch.name, action="login", error=err))
-        from . import manage
+    from . import manage, state
+    from .browser_binding import exclusive_browser
 
-        nxt = manage.browser_login_next(ch)
-        return _emit(envelope(channel=ch.name, action="login", backend="agent-reach-browser",
-                              items=[{"opened": ch.login_url, "next": nxt}]))
     try:
-        synced = ch.sync_login()
+        manage.add(ch.name)
+        with exclusive_browser():  # opening the window may start the browser
+            browser.start(ch.login_url)
+        state.mutate(lambda data: data.setdefault("session_revisions", {}).__setitem__(ch.name, state.now()))
     except ReachError as err:
         return _emit(envelope(channel=ch.name, action="login", error=err))
-    if synced is not None:
-        return _emit(envelope(channel=ch.name, action="login", backend="agent-reach-browser", items=[synced]))
-    if not ch.login_argv:
-        return _bad_input(ch.name, "login", f"{ch.name} has nothing to sync; just log in in the Agent Reach browser")
-    from .tools import resolve
-
-    exe = resolve(ch.login_argv[0])
-    if not exe:
-        return _emit(envelope(channel=ch.name, action="login", error=ReachError(
-            NEED_SETUP, f"{ch.login_argv[0]} is not installed", hint=f"Run `agent-reach add {ch.name}` first.")))
-    from .browser import CDP_URL
-    from .sessions import session_dir
-
-    argv = [a.replace("{session}", str(session_dir(ch.session))).replace("{cdp_url}", CDP_URL)
-            for a in ch.login_argv[1:]]
-    env = utf8_subprocess_env()
-    if ch.session_home:
-        env.update(session_env(ch.session))
-    # Interactive: the user sees the QR code / prompts on stderr; stdout stays JSON.
-    code = subprocess.call([exe, *argv], env=env, stdout=sys.stderr, stderr=sys.stderr)
-    if code == 0 and not has_login_state(ch.session) and ch.recover_login(_RECOVER_TIMEOUT):
-        # The upstream CLI claimed success but saved nothing; the channel rebuilt
-        # the session from a connected browser instead of asking for another scan.
-        if has_login_state(ch.session):
-            return _emit(envelope(channel=ch.name, action="login", backend=ch.session,
-                                  items=[{"logged_in": True, "recovered_from": "local-browser"}]))
-    if code != 0 or not has_login_state(ch.session):
-        return _emit(envelope(channel=ch.name, action="login",
-                              error=ReachError(UPSTREAM_BROKEN, f"login did not complete (exit {code})",
-                                               hint=ch.login_upstream_hint or None)))
-    from . import state
-    state.mutate(lambda data: data.setdefault("session_reuse", {}).__setitem__(ch.name, {"source": "manual", "at": state.now()}))
-    return _emit(envelope(channel=ch.name, action="login", backend=ch.session, items=[{"logged_in": True}]))
+    return _emit(envelope(channel=ch.name, action="login", backend="agent-reach-browser",
+                          items=[{"opened": ch.login_url, "next": manage.browser_login_next(ch)}]))
 
 
 def _cmd_logout(args: Sequence[str]) -> int:
     try:
-        ch, _ = _login_channel("logout", args)
+        ch = _login_channel("logout", args)
     except _ArgError as exc:
         return _bad_input(None, "logout", str(exc))
-    removed = clear_session(ch.session) if ch.session else False
-    if ch.login_url:
-        from . import manage, state
-        browser.clear_site(manage.site_domains(ch))
-        def forget(saved):
-            saved["checks"].pop(ch.name, None)
-            saved.setdefault("session_reuse", {})[ch.name] = {"blocked": True, "at": state.now()}
-            saved.get("reuse_sources", {}).pop(ch.name, None)
-            saved.setdefault("session_migrations", {})[ch.name] = {"at": state.now(), "logged_out": True}
-            saved.setdefault("session_revisions", {})[ch.name] = state.now()
-        state.mutate(forget)
-        removed = True
-    if ch.logout_keys:
-        from agent_reach.config import Config
+    from . import manage, state
 
-        cfg = Config()
-        for key in ch.logout_keys:
-            if cfg.get(key):
-                cfg.delete(key)
-                removed = True
-    if not ch.login_url:
-        from . import state
-        state.mutate(lambda data: data.setdefault("session_reuse", {}).__setitem__(ch.name, {"blocked": True, "at": state.now()}))
-    return _emit(envelope(channel=ch.name, action="logout", backend=ch.session or "config", items=[{"removed": removed}]))
+    try:
+        cleared = browser.clear_site(manage.site_domains(ch))
+    except ReachError as err:
+        return _emit(envelope(channel=ch.name, action="logout", error=err))
+
+    def forget(saved):
+        saved["checks"].pop(ch.name, None)
+        saved.setdefault("session_revisions", {})[ch.name] = state.now()
+    state.mutate(forget)
+    return _emit(envelope(channel=ch.name, action="logout", backend="agent-reach-browser",
+                          items=[{"removed": True, "cleared_cookies": cleared}]))
 
 
 def _cmd_browser(args: Sequence[str]) -> int:
     parser = _Parser(prog="browser", add_help=False)
-    parser.add_argument("op", choices=("setup", "status", "stop", "profiles", "use"))
-    parser.add_argument("profile", nargs="?")
+    parser.add_argument("op", choices=("setup", "status", "stop"))
     try:
         ns = parser.parse_args(list(args))
-        if ns.op in ("profiles", "use"):
-            from . import session_reuse
-            if ns.op == "use":
-                if not ns.profile:
-                    raise _ArgError("browser use requires a connected profile ID")
-                return _mgmt("browser use", session_reuse.use, ns.profile)
-            return _mgmt("browser profiles", lambda: {"profiles": session_reuse.profiles()})
-        if ns.profile:
-            raise _ArgError("a profile ID applies only to browser use")
-        if ns.op in ("setup", "stop"):
-            from .browser_binding import exclusive_browser
-            def run(fn, **kw):
-                with exclusive_browser():
-                    return fn(**kw)
-            if ns.op == "setup":
-                return _mgmt("browser setup", run, browser.setup)
-            return _mgmt("browser stop", run, browser.stop)
-        return _mgmt("browser " + ns.op, getattr(browser, ns.op))
     except _ArgError as exc:
         return _bad_input(None, "browser", str(exc))
+    if ns.op == "status":
+        return _mgmt("browser status", browser.status)
+    from .browser_binding import exclusive_browser
+
+    def run(fn):
+        with exclusive_browser():
+            return fn()
+    return _mgmt("browser " + ns.op, run, browser.setup if ns.op == "setup" else browser.stop)
 
 
 def main(argv: Sequence[str]) -> int:

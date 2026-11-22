@@ -12,8 +12,8 @@ _TWITTER_LOGIN_HINT = (
 )
 
 
-def _x(args, timeout: float) -> list:
-    items = opencli_items(opencli_call("twitter", list(args), timeout=timeout, login_hint=_TWITTER_LOGIN_HINT))
+def _x(command: str, values, timeout: float, limit=None) -> list:
+    items = opencli_items(opencli_call("twitter", command, values, limit=limit, timeout=timeout, login_hint=_TWITTER_LOGIN_HINT))
     if not items:
         raise ReachError(UPSTREAM_BROKEN, "OpenCLI finished but returned no items")
     return items
@@ -79,15 +79,15 @@ class TwitterChannel(Channel):
     # ── unified entry backends ──
 
     def _opencli_search(self, *, query: str, limit: int, timeout: float) -> list:
-        return _x(["search", query, "--limit", str(limit)], timeout)[:limit]
+        return _x("search", [query], timeout, limit)[:limit]
 
 
     def _opencli_profile(self, *, username: str, timeout: float) -> list:
-        return _x(["profile", username.lstrip("@")], timeout)[:1]
+        return _x("profile", [username.lstrip("@")], timeout)[:1]
 
     def _opencli_tweets(self, *, username: str, limit: int, timeout: float) -> list:
-        return _x(["tweets", username.lstrip("@"), "--limit", str(limit)], timeout)[:limit]
+        return _x("tweets", [username.lstrip("@")], timeout, limit)[:limit]
 
     def _opencli_thread(self, *, target: str, timeout: float) -> list:
         tweet_id = str(target).rstrip("/").split("/")[-1].split("?")[0]
-        return _x(["thread", tweet_id], timeout)
+        return _x("thread", [tweet_id], timeout)

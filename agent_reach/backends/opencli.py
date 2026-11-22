@@ -1,16 +1,12 @@
 # -*- coding: utf-8 -*-
 """OpenCLI backend: run `opencli <site> ...` in the Agent Reach browser.
 
-OpenCLI (github.com/jackwener/opencli) drives Chrome through a browser-bridge
-extension + local daemon. Agent Reach uses one shared, Reach-owned browser profile.
+OpenCLI drives Chrome through a browser extension and a local daemon. Agent
+Reach uses the hardened fork (github.com/TaxD/OpenCLI), whose daemon requires a
+secret token, at a pinned and checksummed release, in one Reach-owned profile.
 """
 
 import json
-
-OPENCLI_EXTENSION_ID = "ildkmabpimmkaediidaifkhjpohdnifk"
-OPENCLI_EXTENSION_URL = (
-    f"https://chromewebstore.google.com/detail/opencli/{OPENCLI_EXTENSION_ID}"
-)
 
 
 def _opencli_error(text: str, login_hint: str):
@@ -57,18 +53,27 @@ def _opencli_error(text: str, login_hint: str):
     return ReachError(UPSTREAM_BROKEN, message)
 
 
-def opencli_call(site: str, args, *, timeout: float, login_hint: str = ""):
-    """One bounded command, using an explicit existing browser binding. No retry."""
+#: The only OpenCLI commands Reach may run: read-only ones. OpenCLI also has commands that
+#: post, reply, vote or subscribe; they are never reachable through Reach.
+READ_ONLY = {"reddit": {"search", "read", "subreddit"}, "twitter": {"search", "profile", "tweets", "thread"}}
+
+
+def opencli_call(site: str, command: str, values=(), *, limit=None, timeout: float, login_hint: str = ""):
+    """One bounded read-only command in the dedicated browser. No retry.
+
+    `values` are caller-supplied data. They are passed after `--`, so none of
+    them can be read as an option, and one that starts with `-` is refused.
+    """
     from agent_reach.runtime.browser_binding import environment
+    from agent_reach.runtime.result import BAD_INPUT, ReachError
     from agent_reach.runtime.run import CommandFailed, run_cmd
 
-    # Caller-supplied values are positional. One that looks like an option could switch
-    # OpenCLI into another mode, so refuse it before the browser is even prepared.
-    if any(str(a).startswith("-") and a != "--limit" for a in args):
-        from agent_reach.runtime.result import BAD_INPUT, ReachError
-        raise ReachError(BAD_INPUT, "arguments must not start with '-'")
+    values = [str(v) for v in values]
+    if command not in READ_ONLY.get(site, ()) or any(v.startswith("-") or not v for v in values):
+        raise ReachError(BAD_INPUT, "arguments must not be empty or start with '-'")
     env = environment(site)
-    argv = ["opencli", site, *args, "-f", "json"]
+    options = ["--limit", str(int(limit))] if limit is not None else []
+    argv = ["opencli", site, command, *options, "-f", "json", "--", *values]
     try:
         out = run_cmd(argv, timeout=timeout, env=env)
     except CommandFailed as exc:
@@ -79,8 +84,6 @@ def opencli_call(site: str, args, *, timeout: float, login_hint: str = ""):
         raise _opencli_error(out, login_hint) from None
     if isinstance(data, dict) and data.get("ok") is False:
         raise _opencli_error(out, login_hint)
-    from agent_reach.runtime import browser
-    browser.save_session()
     return data
 
 
@@ -121,26 +124,3 @@ def opencli_items(rows) -> list:
             )
         )
     return items
-
-
-def export_site_cookies(profile: str, domain: str) -> list:
-    """Read one site's cookies through the official existing Browser Bridge API."""
-    from pathlib import Path
-
-    from agent_reach.runtime import bridge
-    from agent_reach.runtime.result import NEED_SETUP, ReachError
-    from agent_reach.runtime.run import run_cmd
-    bridge.require_running()
-    argv, _ = bridge.launch_spec()
-    module = Path(argv[-1]).parent / "browser" / "page.js"
-    if not module.is_file():
-        raise ReachError(NEED_SETUP, "This OpenCLI version does not expose its Page cookie API")
-    script = (f"import {{Page}} from {json.dumps(module.as_uri())};"
-              "const page=new Page('reach-site-session',undefined,process.argv[1]);"
-              "console.log(JSON.stringify(await page.getCookies({domain:process.argv[2]})));")
-    try:
-        result = json.loads(run_cmd([argv[0], "--input-type=module", "-e", script, profile, domain], timeout=15))
-    except (ReachError, ValueError):
-        # Never include upstream output here: it may contain credentials.
-        raise ReachError(NEED_SETUP, "The existing browser could not share this site's login") from None
-    return result if isinstance(result, list) else []

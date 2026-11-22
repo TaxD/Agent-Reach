@@ -95,7 +95,7 @@ def capability_summary(channels, statuses):
     for ch in channels:
         current = by_name.get(ch.name, {})
         names = [action.name for action in ch.actions]
-        can_login = bool(ch.login_url or ch.login_argv)
+        can_login = bool(ch.login_url)
         auth_actions = names if can_login else []
         entries.append({
             'channel': ch.name,

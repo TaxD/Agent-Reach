@@ -8,7 +8,7 @@ Each channel represents a platform (YouTube, GitHub, Hacker News, ...) and decla
   - actions → unified actions (`agent-reach <channel> <action>`), each with an
     ordered list of (backend label, method name); the dispatcher tries them in
     order and falls back on retryable errors.
-  - tools / prereqs / session / login_* → what `add`, `login` and `doctor` need.
+  - tools / prereqs / login_url → what `add`, `login` and `doctor` need.
 """
 
 from abc import ABC, abstractmethod
@@ -61,15 +61,8 @@ class Channel(ABC):
     level: str = ""
     #: Unified actions this channel exposes.
     actions: Tuple[Action, ...] = ()
-    #: Tool whose login lives in ~/.agent-reach/sessions/<session>/ ("" = none).
-    session: str = ""
-    #: Interactive command the user runs to log in (run with HOME = session dir).
-    login_argv: Tuple[str, ...] = ()
-    #: Directories under the real home where the tool used to keep its login,
-    #: copied into the session only when the user asks (`login --import-existing`).
-    legacy_state: Tuple[str, ...] = ()
     #: Page the user logs in on, opened in the Agent Reach browser by `agent-reach login`.
-    #: A login_url makes the channel need Chrome (installed by `add` when missing).
+    #: A login_url makes the channel a login channel: it needs Chrome, Node.js and the pinned OpenCLI.
     login_url: str = ""
     #: Cookie domains `agent-reach remove` clears in the Agent Reach browser
     #: (empty = the login_url host without "www.").
@@ -79,14 +72,8 @@ class Channel(ABC):
     #: Machine prerequisites (node, ffmpeg, chrome; keys of runtime.tools.TOOLS)
     #: that `agent-reach add` installs when the machine has none.
     prereqs: Tuple[str, ...] = ()
-    #: Config keys `agent-reach logout` clears.
-    logout_keys: Tuple[str, ...] = ()
     #: `agent-reach configure` key the user must provide before the channel works ("" = none).
     needs_key: str = ""
-    #: Run login_argv / tool calls with HOME = the session dir. False when the tool
-    #: takes an explicit path instead (login_argv may use the `{session}` placeholder).
-    session_home: bool = True
-
     def setup_problems(self) -> List[str]:
         """What still blocks this channel after its tools are installed (keys, browser...)."""
         return []
@@ -99,25 +86,6 @@ class Channel(ABC):
 
     def on_remove(self) -> None:
         """Undo on_add."""
-
-    def sync_login(self) -> Optional[dict]:
-        """Pull login state from the Agent Reach browser after the user logged in there.
-
-        Return a result dict, or None to fall back to running `login_argv`.
-        """
-        return None
-
-    def recover_login(self, timeout: float) -> bool:
-        """Last resort when the native login exits 0 but saved no credential.
-
-        Upstream CLIs occasionally report a completed login and still write an
-        empty credential file. Channels that can rebuild one from the local
-        browser session return True after doing so; everyone else stays False.
-        """
-        return False
-
-    #: Explanation shown when the native login claims success but saved nothing.
-    login_upstream_hint: str = ""
 
     @abstractmethod
     def can_handle(self, url: str) -> bool:
