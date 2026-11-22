@@ -64,7 +64,8 @@ def _within_budget(items: list) -> tuple:
         first = items[0]
         if isinstance(first.get("text"), str) and len(first["text"]) > MAX_TEXT_CHARS:
             first["text"] = first["text"][:MAX_TEXT_CHARS] + " …(truncated)"
-        first["raw"] = _bounded_raw(first.get("raw"))
+        if "raw" in first:
+            first["raw"] = _bounded_raw(first["raw"])
     for item in items:
         try:
             size = len(json.dumps(item, ensure_ascii=False, default=str))
