@@ -36,11 +36,24 @@ def test_public_success_never_installs_binds_or_opens_a_browser(monkeypatch, pub
     assert out["items"][0]["raw"]["content_scope"] == "search_results"
 
 
+def _add_reddit():
+    state.mutate(lambda data: data["channels"].__setitem__("reddit", {"added_at": state.now()}))
+
+
 def test_explicit_site_backend_bypasses_web_search(monkeypatch, public_search):
+    _add_reddit()
     site = Mock(return_value=[make_item(title="Site result", url=URL)])
     monkeypatch.setattr(RedditChannel, "_opencli_search", site)
     out = run_action(RedditChannel(), "search", {"query": "Data"}, only_backend="opencli")
     assert out["backend"] == "opencli" and site.call_count == 1
+    public_search.assert_not_called()
+
+
+def test_explicit_site_backend_of_a_channel_not_added_needs_setup(monkeypatch, public_search):
+    site = Mock(side_effect=AssertionError("site tool ran for a channel that is not added"))
+    monkeypatch.setattr(RedditChannel, "_opencli_search", site)
+    out = run_action(RedditChannel(), "search", {"query": "Data"}, only_backend="opencli")
+    assert out["error"]["code"] == "NEED_SETUP" and "agent-reach add reddit" in out["error"]["hint"]
     public_search.assert_not_called()
 
 
@@ -60,9 +73,9 @@ def test_web_provider_failure_does_not_become_platform_login_or_cooldown(monkeyp
     def fail(self, **kwargs):
         raise ReachError(code, "Web provider failure")
     monkeypatch.setattr(WebChannel, "_exa_search", fail)
-    monkeypatch.setattr(RedditChannel, "_opencli_search", lambda *a, **k: [make_item(title="Site result", url=URL)])
+    monkeypatch.setattr(RedditChannel, "_opencli_search", Mock(side_effect=AssertionError("site tool not added")))
     out = run_action(RedditChannel(), "search", {"query": "Data"})
-    assert out["ok"] and out["backend"] == "opencli"
+    assert out["error"]["code"] == "NEED_SETUP", "the public failure is not reported as a platform verdict"
     assert not state.load().get("cooldowns", {}).get("reddit")
 
 
@@ -71,21 +84,31 @@ def test_web_provider_failure_does_not_become_platform_login_or_cooldown(monkeyp
                                  [make_item(url="https://x.com@evil.test/status/1")]])
 def test_no_hits_or_wrong_scope_only_trigger_site_attempt_not_login(monkeypatch, public_search, rows):
     public_search.return_value = rows
+    _add_reddit()
     monkeypatch.setattr(RedditChannel, "_opencli_search", Mock(side_effect=ReachError("TIMEOUT", "Site timed out")))
     out = run_action(RedditChannel(), "search", {"query": "Data"})
     assert out["error"]["code"] == "TIMEOUT"
+    public_search.assert_called_once()  # an added channel falls back to public once after a site failure
+
+
+@pytest.mark.parametrize("rows", [[], [make_item(url="https://www.reddit.com/user/person")]])
+def test_no_public_hits_for_a_channel_not_added_needs_setup_not_login(monkeypatch, public_search, rows):
+    public_search.return_value = rows
+    monkeypatch.setattr(RedditChannel, "_opencli_search", Mock(side_effect=AssertionError("browser touched")))
+    out = run_action(RedditChannel(), "search", {"query": "Data"})
+    assert out["error"]["code"] == "NEED_SETUP"
     public_search.assert_called_once()
 
 
 def test_actual_site_login_wall_is_reported_only_after_public_attempt(monkeypatch, public_search):
-    public_search.return_value = []
+    _add_reddit()
     def site(*args, **kwargs):
-        assert public_search.call_count == 1
         raise ReachError("NEED_LOGIN", "Site requires login")
     monkeypatch.setattr(RedditChannel, "_opencli_search", site)
     out = run_action(RedditChannel(), "search", {"query": "Data"})
     assert out["error"]["code"] == "NEED_LOGIN"
     assert [a["backend"] for a in out["meta"]["attempts"]][-1] == "opencli"
+    public_search.assert_not_called()  # a login wall is final: no public fallback
 
 
 def test_public_read_accepts_full_text_beside_a_login_link(monkeypatch):
@@ -110,9 +133,9 @@ def test_short_public_post_beside_login_link_is_still_usable(monkeypatch):
                                         ("Just a moment", TEXT)])
 def test_shells_and_login_pages_are_not_successful_read_results(monkeypatch, title, text):
     monkeypatch.setattr(WebChannel, "_jina_read", lambda self, **k: [make_item(title=title, url=URL, text=text)])
-    monkeypatch.setattr(RedditChannel, "_opencli_read", Mock(side_effect=ReachError("NEED_LOGIN", "Site login required")))
+    monkeypatch.setattr(RedditChannel, "_opencli_read", Mock(side_effect=AssertionError("browser touched")))
     out = run_action(RedditChannel(), "read", {"target": URL})
-    assert not out["ok"] and out["error"]["code"] == "NEED_LOGIN"
+    assert not out["ok"] and out["error"]["code"] == "NEED_SETUP"
     assert any(a["result"] == "INSUFFICIENT_CONTENT" for a in out["meta"]["attempts"])
 
 

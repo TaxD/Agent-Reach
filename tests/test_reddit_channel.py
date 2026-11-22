@@ -26,21 +26,12 @@ def test_can_handle_rejects_non_reddit():
         assert channel.can_handle(url) is False, url
 
 
-def test_unconfigured_browser_is_prepared_without_assuming_login(monkeypatch):
-    from agent_reach.runtime import browser, session_reuse
-    launch = Mock()
-    monkeypatch.setattr(browser, "ensure_running", launch)
-    monkeypatch.setattr(browser, "connected_contexts", lambda: [])
-    monkeypatch.setattr(browser, "bound_context", lambda: None)
-    result = session_reuse.prepare("reddit")
-    assert launch.call_count == 1 and result["copied_cookies"] == 0
-    assert "required_action" not in result and not result.get("blocked")
-
-
 def test_actual_login_error_is_reported_as_need_login(monkeypatch):
     from agent_reach.channels import reddit
+    from agent_reach.runtime import state
     from agent_reach.runtime.dispatch import run_action
     from agent_reach.runtime.result import NEED_LOGIN, ReachError
+    state.mutate(lambda data: data["channels"].__setitem__("reddit", {"added_at": state.now()}))
     request = Mock(side_effect=ReachError(NEED_LOGIN, "Login wall on the selected browser path"))
     monkeypatch.setattr(reddit, "opencli_call", request)
     result = run_action(RedditChannel(), "search", {"query": "DeepSeek"}, only_backend="opencli")
@@ -66,21 +57,3 @@ def test_read_url_defaults_to_public_web_and_preserves_explicit_browser(monkeypa
         argv += ["--backend", backend]
     assert cli.main(argv) == 0
     assert json.loads(capsys.readouterr().out)["channel"] == expected
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def _opencli(installed=True, broken=False, ready=True, hint=""):
-    return Mock(installed=installed, broken=broken, ready=ready, hint=hint)

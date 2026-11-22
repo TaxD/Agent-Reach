@@ -18,7 +18,7 @@ import subprocess
 import time
 import urllib.request
 
-from agent_reach.utils.paths import read_small_text_no_follow
+from agent_reach.utils.paths import PrivatePathError, read_small_text_no_follow
 
 from . import tools
 from .result import NEED_SETUP, ReachError
@@ -36,9 +36,13 @@ def env() -> dict:
 
 
 def _token() -> bytes:
+    """Read the token; asking about the daemon never creates one."""
     from . import browser
 
-    return (read_small_text_no_follow(browser.ensure_token(), max_bytes=4096) or "").strip().encode("utf-8")
+    try:
+        return (read_small_text_no_follow(browser.daemon_token_path(), max_bytes=4096) or "").strip().encode("utf-8")
+    except (OSError, PrivatePathError):
+        return b""
 
 
 def _open(path: str, headers: dict):
@@ -58,6 +62,8 @@ def signature(method: str, path: str, body: bytes = b"") -> str:
 def daemon_is_ours() -> bool:
     """Whatever listens on the port proves it knows our token (so it is our daemon, not a squatter)."""
     nonce = secrets.token_hex(16)
+    if len(_token()) < 32:
+        return False
     try:
         reply = _open("/ping?nonce=" + nonce, {})
     except (OSError, ValueError):
@@ -115,9 +121,12 @@ def start():
     """Start our daemon as a child of the watcher; returns its handle."""
     argv, version = launch_spec()
     if status():
-        raise ReachError(NEED_SETUP, _FOREIGN[0], hint=_FOREIGN[1])
+        # It proved it knows our token, and the caller holds the watcher lock: this is our own
+        # daemon left behind by a watcher that was killed. Ask it to stop, then start a fresh one.
+        _shutdown_own_orphan()
+    inherited = {k: v for k, v in os.environ.items() if not k.startswith("OPENCLI_")}
     proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            env={**os.environ, **env()}, cwd=os.path.expanduser("~"))
+                            env={**inherited, **env()}, cwd=os.path.expanduser("~"))
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         current = status()
@@ -131,6 +140,22 @@ def start():
     close(proc)
     raise ReachError(NEED_SETUP, "The OpenCLI daemon could not start alongside the dedicated browser",
                      hint="Port 19825 may be in use by another program.")
+
+
+def _shutdown_own_orphan() -> None:
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    request = urllib.request.Request(URL + "/shutdown", data=b"", method="POST",
+                                     headers={"X-OpenCLI": "1", "Authorization": signature("POST", "/shutdown")})
+    try:
+        opener.open(request, timeout=5).close()
+    except OSError:
+        pass
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and _something_listens():
+        time.sleep(0.2)
+    if _something_listens():
+        raise ReachError(NEED_SETUP, "A previous OpenCLI daemon of Agent Reach did not stop",
+                         hint="Retry in a minute. If it persists, ask the user to end the leftover `node ... daemon.js` process.")
 
 
 def close(proc) -> None:

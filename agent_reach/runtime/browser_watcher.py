@@ -119,7 +119,7 @@ def _login_pages() -> dict:
 
 def _open(conn: PipeConnection, url: object = None, **_ignored) -> dict:
     """Open a registered channel's login page in a new tab and bring it to the front."""
-    if url not in _login_pages():
+    if not isinstance(url, str) or url not in _login_pages():
         return {"ok": False, "error": "not a registered login page"}
     reply = conn.call("Target.createTarget", {"url": url})
     target = (reply.get("result") or {}).get("targetId")

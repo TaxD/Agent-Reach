@@ -71,6 +71,7 @@ def run_cmd(
     cwd: Optional[str] = None,
     label: Optional[str] = None,
     input_data: Optional[str] = None,
+    drop_env_prefix: str = "",
 ) -> str:
     """Run an upstream command and return stdout.
 
@@ -85,6 +86,8 @@ def run_cmd(
     if not exe:
         raise ReachError(NEED_SETUP, f"{name} is not installed")
     run_env = utf8_subprocess_env()
+    if drop_env_prefix:  # inherited settings of that tool must not steer it; only `env` does
+        run_env = {k: v for k, v in run_env.items() if not k.startswith(drop_env_prefix)}
     if env:
         run_env.update(env)
     # The local API worker is already in a supervised process group. Keep its

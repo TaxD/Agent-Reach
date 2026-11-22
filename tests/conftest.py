@@ -91,18 +91,23 @@ def isolated_home(tmp_path, monkeypatch):
         raise OSError("Unit tests require an explicit mocked HTTP response")
     monkeypatch.setattr(urllib.request, "urlopen", no_network)
 
-    from agent_reach.runtime import bridge, cdp
+    from agent_reach.runtime import bridge
+    # The daemon port is machine-wide even when HOME is temporary: never probe or start it.
     monkeypatch.setattr(bridge, "status", lambda: {"ok": True, "daemonVersion": "1.8.7", "profiles": []})
     monkeypatch.setattr(bridge, "launch_spec", lambda: (["node", "daemon.js"], "1.8.7"))
     monkeypatch.setattr(bridge, "start", lambda: None)
-    monkeypatch.setattr(cdp, "_json", lambda *a, **k: None)  # unit tests never inspect the real dedicated browser
     original_popen = subprocess.Popen
     def local_commands_only(argv, *args, **kwargs):
         # OpenCLI uses a machine-wide port even when HOME is temporary.
         if isinstance(argv, (list, tuple)) and argv:
             executable = Path(argv[0])
-            if "pip" in argv and "install" in argv:
+            words = [str(a) for a in argv]
+            if "pip" in words and "install" in words:
                 pytest.fail("Unmocked pip install would download real dependencies during a unit test")
+            if executable.name in {"npm", "npm.cmd"} and ("ci" in words or "install" in words):
+                pytest.fail("Unmocked npm install would download real packages during a unit test")
+            if "--remote-debugging-pipe" in words or "agent_reach.runtime.browser_watcher" in words:
+                pytest.fail("Unmocked browser start would open a real Chrome during a unit test")
             if executable.name in {"opencli", "opencli.cmd"} and "--version" not in argv and home not in executable.resolve().parents:
                 pytest.fail("Unmocked OpenCLI command would touch the user's Bridge daemon")
         return original_popen(argv, *args, **kwargs)

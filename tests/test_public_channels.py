@@ -299,9 +299,10 @@ def test_opencli_refuses_option_like_arguments_before_touching_the_browser(monke
     from agent_reach.runtime import browser_binding
 
     monkeypatch.setattr(browser_binding, "environment", lambda site: pytest.fail("must not prepare the browser"))
-    for args in (["search", "--profile=other"], ["read", "-f"], ["profile", "--help"]):
+    for command, values in (("search", ["--profile=other"]), ("read", ["-f"]), ("profile", ["--help"]),
+                            ("search", [""]), ("search", ["ok", "-x"])):
         with pytest.raises(ReachError) as err:
-            opencli.opencli_call("reddit", args, timeout=1)
+            opencli.opencli_call("reddit" if command != "profile" else "twitter", command, values, timeout=1)
         assert err.value.code == BAD_INPUT
 
 
@@ -312,3 +313,46 @@ def test_github_target_cannot_walk_the_api_path(target):
     with pytest.raises(ReachError) as err:
         _parse_target(target)
     assert err.value.code == BAD_INPUT
+
+
+def test_site_search_rate_limit_is_the_providers_not_the_sites(monkeypatch):
+    from agent_reach.channels.web import WebChannel
+
+    def limited(self, **kw):
+        raise ReachError("RATE_LIMITED", "exa 429")
+
+    monkeypatch.setattr(WebChannel, "_exa_search", limited)
+    with pytest.raises(ReachError) as err:
+        _public.site_search(("dev.to",), "q", 5, 1)
+    assert err.value.code == UPSTREAM_BROKEN, "a search provider limit must not cool the channel down"
+
+    def broken(self, **kw):
+        raise ReachError("TIMEOUT", "slow")
+
+    monkeypatch.setattr(WebChannel, "_exa_search", broken)
+    with pytest.raises(ReachError) as err:
+        _public.site_search(("dev.to",), "q", 5, 1)
+    assert err.value.code == "TIMEOUT"
+
+
+@pytest.mark.parametrize("text", ["", "   ", "Just a moment...\nChecking your browser",
+                                  "Access Denied\nYou don't have permission", "Please verify you are human",
+                                  "You've been blocked by network security."])
+def test_web_readers_treat_block_pages_as_failures(monkeypatch, text):
+    from agent_reach.channels.web import WebChannel
+
+    monkeypatch.setattr(WebChannel, "_jina_read", lambda self, **kw: [{"title": "x", "text": text}])
+    with pytest.raises(ReachError) as err:
+        MediumChannel()._jina_read(target="https://medium.com/@a/post", timeout=1)
+    assert err.value.code == UPSTREAM_BROKEN
+
+
+def test_web_readers_pass_real_content_through(monkeypatch):
+    from agent_reach.channels.web import WebChannel
+
+    rows = [{"title": "Post", "text": "A long article about access control and denied requests."}]
+    monkeypatch.setattr(WebChannel, "_exa_read", lambda self, **kw: rows)
+    assert MediumChannel()._exa_read(target="https://medium.com/@a/post", timeout=1) == rows
+    monkeypatch.setattr(WebChannel, "_exa_read", lambda self, **kw: [])
+    with pytest.raises(ReachError):
+        MediumChannel()._exa_read(target="https://medium.com/@a/post", timeout=1)

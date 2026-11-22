@@ -75,7 +75,7 @@ def opencli_call(site: str, command: str, values=(), *, limit=None, timeout: flo
     options = ["--limit", str(int(limit))] if limit is not None else []
     argv = ["opencli", site, command, *options, "-f", "json", "--", *values]
     try:
-        out = run_cmd(argv, timeout=timeout, env=env)
+        out = run_cmd(argv, timeout=timeout, env=env, drop_env_prefix="OPENCLI_")
     except CommandFailed as exc:
         raise _opencli_error(exc.stdout or exc.stderr, login_hint) from None
     try:

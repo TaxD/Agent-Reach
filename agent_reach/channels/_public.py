@@ -381,8 +381,10 @@ class WebReadMixin(Channel):
     @staticmethod
     def _usable(items: list) -> list:
         """A block or challenge page is a failure, so the next reader gets its turn."""
-        head = str((items[0].get("text") if items else "") or "")[:400].casefold()
-        if not head.strip() or any(mark in head for mark in _BLOCK_MARKS):
+        text = str((items[0].get("text") if items else "") or "")
+        head = text[:400].casefold()
+        # Block pages are short; a real article that merely mentions these words is not one.
+        if not text.strip() or (len(text) < 1500 and any(mark in head for mark in _BLOCK_MARKS)):
             raise ReachError(UPSTREAM_BROKEN, "the site returned a block or verification page instead of the content")
         return items
 

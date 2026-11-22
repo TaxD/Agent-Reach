@@ -154,6 +154,23 @@ class PipeConnection:
                 pass
 
 
+def _peer_uid(client: socket.socket) -> Optional[int]:
+    """The user id of the process on the other end of a unix socket, when the OS can tell."""
+    import struct
+    import sys
+
+    try:
+        if sys.platform.startswith("linux"):
+            raw = client.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+            return struct.unpack("3i", raw)[1]
+        if sys.platform == "darwin":
+            raw = client.getsockopt(0, 0x001, struct.calcsize("2I"))  # SOL_LOCAL, LOCAL_PEERCRED -> xucred
+            return struct.unpack("2I", raw)[1]
+    except (OSError, struct.error, AttributeError):
+        return None
+    return None
+
+
 class ControlServer:
     """The watcher's side of the control socket: one JSON line in, one JSON line out."""
 
@@ -167,11 +184,9 @@ class ControlServer:
             path.unlink()  # a socket left by a watcher that is gone; we hold the watcher lock
         self._handlers = handlers
         self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        previous = os.umask(0o177)  # the socket is created 0600: only this user may connect
-        try:
-            self._sock.bind(str(path))
-        finally:
-            os.umask(previous)
+        # The folder is 0700, so nobody else can reach the socket even before the chmod.
+        self._sock.bind(str(path))
+        os.chmod(path, 0o600)
         self._sock.listen(8)
         self._path = path
         threading.Thread(target=self._accept_loop, name="reach-control", daemon=True).start()
@@ -187,6 +202,9 @@ class ControlServer:
     def _serve(self, client: socket.socket) -> None:
         with client:
             try:
+                uid = _peer_uid(client)
+                if uid is not None and uid != os.getuid():
+                    return  # only this user's processes are answered
                 client.settimeout(5)
                 buf = b""
                 while not buf.endswith(b"\n") and len(buf) <= _MAX_LINE:

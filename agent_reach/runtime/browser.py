@@ -177,6 +177,9 @@ def start_lock(wait: float = _LOCK_WAIT) -> Iterator[None]:
 
 
 def watcher_running() -> bool:
+    # Read-only question: never create the browser folder or a lock file to answer it.
+    if sys.platform == "win32" or not watcher_lock_path().exists():
+        return False
     fd = _open_lock(watcher_lock_path())
     try:
         return not try_lock(fd)
@@ -281,9 +284,10 @@ def extension_tree_digest(root: Optional[Path] = None) -> Optional[str]:
         return None
     digest = hashlib.sha256()
     try:
-        for path in sorted(p for p in root.rglob("*") if not p.is_dir()):
-            if path.is_symlink():
-                return None
+        entries = sorted(root.rglob("*"))
+        if any(p.is_symlink() for p in entries):
+            return None  # a link (file or folder) is never part of the release
+        for path in (p for p in entries if not p.is_dir()):
             rel = path.relative_to(root).as_posix()
             if rel == TOKEN_FILE_IN_EXTENSION:
                 continue

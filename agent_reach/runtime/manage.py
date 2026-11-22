@@ -259,7 +259,9 @@ def _install_channel(ch) -> List[dict]:
         browser.ensure_chrome()  # fail early, before anything is downloaded
     installed = [tools.ensure(t) for t in channel_tools(ch)]
     if _uses_browser(ch):
-        browser.refresh_extension()
+        from .browser_binding import exclusive_browser
+        with exclusive_browser():  # replacing extension files closes the browser; let running queries finish
+            browser.refresh_extension()
     ch.on_add()
     return installed
 
