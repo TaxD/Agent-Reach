@@ -162,6 +162,7 @@ def _run(cmd: List[str], timeout: int = 600) -> None:
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            cwd=str(Path.home()),  # never the project the agent happens to be in
         )
     except subprocess.TimeoutExpired:
         raise TranscribeError(f"{cmd[0]} timed out after {timeout}s")
@@ -247,15 +248,12 @@ def _assert_safe_public_url(url: str) -> None:
 def download_audio(url: str, out_dir: Path) -> Path:
     """Download audio with yt-dlp into out_dir; return the resulting file path."""
     _assert_safe_public_url(url)
-    import sys
-
-    from agent_reach.channels.youtube import ytdlp_tls_args
+    from agent_reach.channels.youtube import ytdlp_base_argv
 
     template = out_dir / "source.%(ext)s"
     _run(
         [
-            sys.executable, "-m", "yt_dlp",
-            *ytdlp_tls_args(),
+            *ytdlp_base_argv(),
             "-x",
             "--audio-format",
             "m4a",

@@ -42,10 +42,11 @@ def _opencli_error(text: str, login_hint: str):
     err = err if isinstance(err, dict) else {}
     code = str(err.get("code", "")).upper()
     message = str(err.get("message", "") or text.strip() or "OpenCLI failed")[:500]
-    upstream_hint = str(err.get("help") or err.get("hint") or "").strip() or None
+    # Upstream help text is third-party output. It is never forwarded as `hint`, which
+    # the skill tells agents to act on; only Reach's own hints go there.
     low = message.lower()
     if any(w in low for w in ("browser environment", "captcha", "account_risk")) or code in {"ACCOUNT_RISK", "CAPTCHA_REQUIRED"}:
-        return ReachError(PLATFORM_BLOCKED, message, hint=upstream_hint)
+        return ReachError(PLATFORM_BLOCKED, message)
     if code in {"RATE_LIMITED", "RATE_LIMIT"} or any(w in low for w in ("http 429", "too many requests")):
         return ReachError(RATE_LIMITED, message)
     login_words = ("login", "log in", "logged in", "sign in", "http 401")
@@ -53,7 +54,7 @@ def _opencli_error(text: str, login_hint: str):
             "AUTH" in code or "LOGIN" in code or any(w in low for w in login_words)):
         # Upstream would send the user to their own Chrome; Reach logs in in its own browser.
         return ReachError(NEED_LOGIN, message, hint=login_hint or None)
-    return ReachError(UPSTREAM_BROKEN, message, hint=upstream_hint)
+    return ReachError(UPSTREAM_BROKEN, message)
 
 
 def opencli_call(site: str, args, *, timeout: float, login_hint: str = ""):

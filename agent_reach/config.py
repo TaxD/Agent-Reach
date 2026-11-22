@@ -137,7 +137,13 @@ class Config:
             self.data = {}
             return
 
-        loaded = yaml.safe_load(payload)
+        try:
+            loaded = yaml.safe_load(payload)
+        except yaml.YAMLError as exc:
+            # The parser's message quotes the offending line, which may hold a key.
+            mark = getattr(exc, "problem_mark", None)
+            where = f" (line {mark.line + 1}, column {mark.column + 1})" if mark else ""
+            raise ConfigError(f"The config file is not valid YAML{where}") from None
         if loaded is None:
             loaded = {}
         if not isinstance(loaded, dict):

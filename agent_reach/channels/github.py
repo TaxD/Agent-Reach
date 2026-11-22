@@ -80,7 +80,7 @@ def _api_get(path: str, timeout: float, accept: str = "application/vnd.github+js
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
-        return http_request(f"{_API}{path}", timeout=timeout, headers=headers)
+        return http_request(f"{_API}{path}", timeout=timeout, headers=headers, same_origin_redirects=True)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             raise ReachError(NOT_FOUND, "GitHub API returned HTTP 404") from None
@@ -145,25 +145,31 @@ class GitHubChannel(Channel):
 
     @staticmethod
     def _search(get, query: str, limit: int, timeout: float) -> list:
-        path = "/search/repositories?" + urlencode({"q": query, "per_page": limit})
+        # `is:public` plus the filter below: the user's token must never surface private repositories.
+        path = "/search/repositories?" + urlencode({"q": f"{query} is:public", "per_page": limit})
         data = json.loads(get(path, timeout))
-        return [_repo_item(r) for r in data.get("items", [])[:limit]]
+        return [_repo_item(r) for r in data.get("items", []) if r.get("private") is False][:limit]
 
     @staticmethod
     def _read(get, target: str, timeout: float) -> list:
         owner, repo, number = _parse_target(target)
+        info = json.loads(get(f"/repos/{owner}/{repo}", timeout / 3))
+        if not isinstance(info, dict) or info.get("private") is not False:
+            # Public content only. A token (gh login or github-token) raises rate limits;
+            # it is not a way for the agent to read private repositories. Same answer
+            # as a missing repository, so existence is not disclosed either.
+            raise ReachError(NOT_FOUND, "GitHub repository not found (only public repositories are read)")
         if number is None:
-            info = json.loads(get(f"/repos/{owner}/{repo}", timeout / 2))
             try:
-                readme = get(f"/repos/{owner}/{repo}/readme", timeout / 2, "application/vnd.github.raw")
+                readme = get(f"/repos/{owner}/{repo}/readme", timeout / 3, "application/vnd.github.raw")
                 readme_text = readme.decode("utf-8", errors="replace")[:_README_MAX_CHARS]
             except ReachError as exc:
                 if exc.code != NOT_FOUND:
                     raise
                 readme_text = None
             return [_repo_item(info, readme_text)]
-        issue = json.loads(get(f"/repos/{owner}/{repo}/issues/{number}", timeout / 2))
-        comments = json.loads(get(f"/repos/{owner}/{repo}/issues/{number}/comments?per_page=50", timeout / 2))
+        issue = json.loads(get(f"/repos/{owner}/{repo}/issues/{number}", timeout / 3))
+        comments = json.loads(get(f"/repos/{owner}/{repo}/issues/{number}/comments?per_page=50", timeout / 3))
         parts = [issue.get("body") or ""]
         for c in comments:
             parts.append(f"\n@{(c.get('user') or {}).get('login', '')}: {c.get('body') or ''}")

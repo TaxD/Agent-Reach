@@ -78,6 +78,9 @@ OPENCLI_EXTENSION_URL_PINNED = (
     "https://github.com/jackwener/OpenCLI/releases/download/v2.0.3/" + OPENCLI_EXTENSION_ASSET
 )
 OPENCLI_EXTENSION_SHA256 = "8636d42a0fe44d7ba3b0603dbcd9581e8269ccbca950136d0dfc0ffc39a8a213"
+#: Digest of the unpacked files (see extension_tree_digest). Checked before every load, so a
+#: copy changed on disk after installation is replaced instead of being trusted.
+OPENCLI_EXTENSION_TREE_SHA256 = "c638108540d3212a5103837b36d2b90d883f300fca3365488303c9408cee9687"
 _MAX_EXTENSION_BYTES = 16 * 1024 * 1024
 _USER_AGENT = "agent-reach"
 
@@ -370,6 +373,28 @@ def extension_version() -> Optional[str]:
         return None
 
 
+def extension_tree_digest() -> Optional[str]:
+    """SHA-256 over every file of the installed extension (sorted path, NUL, file digest)."""
+    import hashlib
+
+    root = extension_dir()
+    if root.is_symlink() or not root.is_dir():
+        return None
+    digest = hashlib.sha256()
+    try:
+        for path in sorted(p for p in root.rglob("*") if not p.is_dir()):
+            if path.is_symlink():
+                return None
+            digest.update(path.relative_to(root).as_posix().encode() + b"\0" + hashlib.sha256(path.read_bytes()).digest())
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def extension_intact() -> bool:
+    return extension_tree_digest() == OPENCLI_EXTENSION_TREE_SHA256
+
+
 def refresh_extension(*, upgrade: bool = False) -> dict:
     """Install the pinned OpenCLI extension after verifying its SHA-256.
 
@@ -381,8 +406,7 @@ def refresh_extension(*, upgrade: bool = False) -> dict:
     from .result import UPSTREAM_BROKEN, ReachError
 
     current = extension_version()
-    pinned = _load_state().get("extension_sha256") == OPENCLI_EXTENSION_SHA256
-    if current and (pinned or not upgrade):
+    if current and extension_intact():
         return {"version": current, "updated": False}
     from . import state as ledger
     make_private_dir(browser_root())
@@ -403,10 +427,15 @@ def refresh_extension(*, upgrade: bool = False) -> dict:
         if manifest is None:
             raise ValueError("no manifest.json in the extension zip")
         version = json.loads(manifest.read_text("utf-8")).get("version")
+        if manifest.parent != unpacked:
+            raise ValueError("unexpected layout in the extension zip")
         if is_running():
             stop()  # never swap files under a running extension; the next launch loads the new one
         shutil.rmtree(extension_dir(), ignore_errors=True)
         os.replace(manifest.parent, extension_dir())
+        if not extension_intact():
+            shutil.rmtree(extension_dir(), ignore_errors=True)
+            raise ReachError(UPSTREAM_BROKEN, "the unpacked OpenCLI extension does not match the pinned files; removed")
     except ReachError:
         raise
     except Exception as exc:  # noqa: BLE001
@@ -460,7 +489,7 @@ def _launch(url: str, *, headless: bool = True) -> None:
             raise ReachError(UPSTREAM_BROKEN, f"the Agent Reach browser did not open within {START_WAIT:.0f}s")
         _spawn_watcher()
         return
-    if not extension_version():
+    if not extension_intact():
         with contextlib.suppress(ReachError):
             refresh_extension()  # offline: open without it; the OpenCLI wait reports the problem
     # A watcher still exiting from the last browser holds its lock for a moment; the new one waits for it.

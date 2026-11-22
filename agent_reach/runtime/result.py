@@ -45,6 +45,8 @@ DEFAULT_HINTS = {
 }
 
 _MAX_MESSAGE_CHARS = 500
+#: Upper bound for one item's text (a long README or transcript still fits).
+MAX_TEXT_CHARS = 200_000
 
 
 class ReachError(Exception):
@@ -92,12 +94,19 @@ def make_item(
     raw: Any = None,
 ) -> dict:
     """One normalized item. Missing fields are null; `raw` keeps upstream data."""
+    def cap(value, limit):
+        # Third-party fields are bounded so one response cannot flood the agent's context.
+        if value is None or value == "":
+            return None
+        value = value if isinstance(value, str) else str(value)
+        return value if len(value) <= limit else value[:limit] + " …(truncated)"
+
     return {
-        "title": title or None,
-        "url": url or None,
-        "author": author or None,
-        "published_at": published_at or None,
-        "text": text or None,
+        "title": cap(title, 500),
+        "url": cap(url, 2000),
+        "author": cap(author, 200),
+        "published_at": cap(published_at, 64),
+        "text": cap(text, MAX_TEXT_CHARS),
         "raw": raw,
     }
 

@@ -10,7 +10,6 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -21,7 +20,7 @@ from agent_reach import __version__
 from agent_reach.utils.paths import home_dir
 
 from . import state, tools, update_notice
-from .result import BAD_INPUT, NEED_SETUP, UPSTREAM_BROKEN, ReachError
+from .result import BAD_INPUT, UPSTREAM_BROKEN, ReachError
 
 REPO = update_notice.REPO
 CHECK_FRESH_SECONDS = 24 * 3600
@@ -458,6 +457,33 @@ def _remove(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def _shipped_skill_files() -> List[str]:
+    """Relative paths of the skill files this version writes."""
+    from importlib.resources import files
+
+    refs = files("agent_reach").joinpath("skill").joinpath("references")
+    return ["SKILL.md"] + sorted("references/" + f.name for f in refs.iterdir() if f.is_file() and f.name.endswith(".md"))
+
+
+def _remove_skill_copy(folder: Path) -> None:
+    """Remove our skill from `folder`: a link is unlinked; in a copy only the files we ship go.
+
+    Anything else a user put in that folder stays, and the folder is removed only if empty.
+    """
+    if folder.is_symlink():
+        folder.unlink()
+        return
+    for rel in _shipped_skill_files():
+        path = folder / rel
+        if path.is_file() and not path.is_symlink():
+            path.unlink()
+    for directory in (folder / "references", folder):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+
+
 def _write_real_copy(text: str) -> Path:
     real = skill_dir()
     if (real / "SKILL.md").exists() and not _is_our_copy(real):
@@ -602,7 +628,7 @@ def unlink_skill(skills_dir: str) -> dict:
                          hint="Use `agent-reach uninstall` to remove the instructions everywhere.")
     target = target_dir / SKILL_NAME
     if _links_to_real(target) or _is_our_copy(target):
-        _remove(target)
+        _remove_skill_copy(target)
     elif target.exists() or target.is_symlink():
         raise ReachError(BAD_INPUT, f"{target}: not an Agent Reach link or copy; left it untouched")
     data = state.load()
@@ -621,13 +647,16 @@ def _skill_uninstall_targets() -> List[Path]:
         path = Path(rec["path"])
         if rec["kind"] == "link" and _links_to_real(path):
             found.append(path)
-    for folder, files in data.get("files", {}).items():
+    shipped = set(_shipped_skill_files())
+    for folder in data.get("files", {}):
+        # The ledger only names candidate folders. What is deleted is decided here:
+        # the files this version ships, inside a folder called agent-reach that is ours.
         base = Path(folder)
-        if base.is_symlink():
+        if base.name != SKILL_NAME or ".." in base.parts or base.is_symlink() or not _is_our_copy(base):
             continue
-        for name in files:
-            path = Path(name)
-            if path.is_relative_to(base) and not any(p.is_symlink() for p in path.parents if p != base.parent):
+        for rel in shipped:
+            path = base / rel
+            if path.is_file() and not path.is_symlink() and not path.parent.is_symlink():
                 found.append(path)
     return list(dict.fromkeys(found))
 
@@ -733,14 +762,6 @@ def install_method() -> str:
     return "other"
 
 
-def _source(version: str) -> str:
-    return f"https://github.com/{REPO}/archive/refs/tags/v{version}.zip"
-
-
-def upgrade_command(version: str) -> List[str]:
-    return ["uv", "tool", "install", "--force", _source(version)]
-
-
 UNINSTALL_PROGRAM = "uv tool uninstall agent-reach"
 
 
@@ -803,50 +824,21 @@ def sync() -> dict:
             "dropped_channels": dropped, "user_actions": actions, "skill": place_skill()}
 
 
-def _finish_update(command: List[str]) -> dict:
-    """Accept the installed copy only after its setup/sync reports success."""
-    failure = ReachError(
-        UPSTREAM_BROKEN,
-        "The new Agent Reach was installed, but its setup/sync did not complete.",
-        hint=f"Run the new copy manually: {subprocess.list2cmdline(command)}",
-    )
-    try:
-        out = subprocess.run(command, capture_output=True, text=True, timeout=1800)
-    except (OSError, subprocess.TimeoutExpired):
-        raise failure from None
-    try:
-        report = json.loads(out.stdout.strip().split("\n")[-1])
-    except (ValueError, IndexError):
-        raise failure from None
-    if (out.returncode != 0 or not isinstance(report, dict)
-            or report.get("ok") is not True or not isinstance(report.get("result"), dict)):
-        raise failure
-    return report["result"]
-
-
 def update(check_only: bool = False) -> dict:
-    """Upgrade Agent Reach when a release is newer, then upgrade every added channel's tools."""
+    """Report a newer release (never installs it) and bring the added channels' tools and the skill in line."""
     info = update_check()
     if check_only:
         return info
     method = install_method()
-    if info["update_available"] and method == "uv":
-        cmd = upgrade_command(info["latest"])
-        run = [tools.resolve("uv") or cmd[0], *cmd[1:]]
-        try:
-            proc = subprocess.run(run, capture_output=True, text=True, timeout=900)
-        except FileNotFoundError:
-            raise ReachError(NEED_SETUP, "uv is not on PATH",
-                             hint="Install uv: https://docs.astral.sh/uv/getting-started/installation/") from None
-        if proc.returncode != 0:
-            raise ReachError(UPSTREAM_BROKEN, f"upgrade failed: {proc.stderr.strip()[-300:]}",
-                             hint=f"Run manually: {' '.join(cmd)}")
-        exe = shutil.which("agent-reach") or sys.argv[0]
-        synced = _finish_update([exe, "update", "--sync-only"])
-        return {**info, "upgraded": True, "method": method, "sync": synced,
-                "user_actions": synced.get("user_actions", [])}
     synced = sync()
-    return {**info, "upgraded": False, "method": method, "sync": synced, "user_actions": synced["user_actions"]}
+    actions = list(synced["user_actions"])
+    if info["update_available"]:
+        # The program never downloads and runs a new copy of itself: a release tag is
+        # mutable and unsigned. The user reviews and installs a specific commit.
+        actions.append(f"Agent Reach {info['latest']} is available. The user installs it themselves from a reviewed "
+                       "commit: `uv tool install --force git+https://github.com/" + REPO + "@<commit>`, "
+                       "then `agent-reach update --sync-only`.")
+    return {**info, "upgraded": False, "method": method, "sync": synced, "user_actions": actions}
 
 
 # ── uninstall ──

@@ -148,6 +148,25 @@ def run_cmd(
     return stdout
 
 
+class _SameOriginRedirects(urllib.request.HTTPRedirectHandler):
+    def __init__(self, url: str):
+        from urllib.parse import urlsplit
+
+        self._origin = self._key(urlsplit(url))
+
+    @staticmethod
+    def _key(parts):
+        return parts.scheme.lower(), (parts.hostname or "").lower(), parts.port
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        from urllib.parse import urlsplit
+
+        fp.close()  # do not buffer the redirect body
+        if self._key(urlsplit(newurl)) != self._origin:
+            raise ReachError("UPSTREAM_BROKEN", "refused a redirect to another origin on a credentialed request")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def http_request(
     url: str,
     *,
@@ -155,12 +174,20 @@ def http_request(
     data: Optional[bytes] = None,
     headers: Optional[Mapping[str, str]] = None,
     max_bytes: int = _DEFAULT_MAX_BYTES,
+    same_origin_redirects: bool = False,
 ) -> bytes:
-    """GET (or POST when `data` is given) with a size cap. Errors propagate to classify()."""
+    """GET (or POST when `data` is given) with a size cap. Errors propagate to classify().
+
+    `same_origin_redirects`: for requests that carry a credential. urllib repeats every
+    header, Authorization included, on a redirect; this refuses any hop that leaves
+    the original scheme://host:port instead.
+    """
     merged = {"User-Agent": _USER_AGENT}
     merged.update(headers or {})
     req = urllib.request.Request(url, data=data, headers=merged)
-    with urllib.request.urlopen(req, timeout=max(timeout, 0.1)) as resp:
+    opened = (urllib.request.build_opener(_SameOriginRedirects(url)).open(req, timeout=max(timeout, 0.1))
+              if same_origin_redirects else urllib.request.urlopen(req, timeout=max(timeout, 0.1)))
+    with opened as resp:
         body = resp.read(max_bytes + 1)
         declared = getattr(resp, "headers", {}).get("Content-Length", "")
         if isinstance(declared, str) and declared.strip().isdigit() and len(body) <= max_bytes:

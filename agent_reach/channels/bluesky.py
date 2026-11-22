@@ -49,11 +49,13 @@ def _post(post: dict, text: str = "") -> dict:
 
 
 def _replies(node: dict, depth: int, out: list) -> None:
+    if depth > 30:
+        return
     for reply in node.get("replies") or []:
         post = reply.get("post") if isinstance(reply, dict) else None
         if not post or len(out) >= 80:
             continue
-        out.append(f"{'  ' * depth}@{(post.get('author') or {}).get('handle', '')}: {(post.get('record') or {}).get('text', '')}")
+        out.append(f"{'  ' * min(depth, 10)}@{(post.get('author') or {}).get('handle', '')}: {(post.get('record') or {}).get('text', '')}")
         _replies(reply, depth + 1, out)
 
 

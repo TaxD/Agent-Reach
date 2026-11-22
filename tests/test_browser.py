@@ -35,7 +35,13 @@ def test_domain_match_is_exact_or_subdomain():
 
 def _pin(monkeypatch, archive):
     import hashlib
+    import zipfile
     monkeypatch.setattr(browser, "OPENCLI_EXTENSION_SHA256", hashlib.sha256(archive.read_bytes()).hexdigest())
+    tree = hashlib.sha256()
+    with zipfile.ZipFile(archive) as zf:
+        for name in sorted(n for n in zf.namelist() if not n.endswith("/")):
+            tree.update(name.encode() + b"\0" + hashlib.sha256(zf.read(name)).digest())
+    monkeypatch.setattr(browser, "OPENCLI_EXTENSION_TREE_SHA256", tree.hexdigest())
     urls = []
     monkeypatch.setattr(browser, "_download", lambda url, dest, timeout=60.0: urls.append(url) or shutil.copy(archive, dest))
     return urls
@@ -82,11 +88,13 @@ def test_extension_archive_with_traversal_or_symlink_is_refused(home, monkeypatc
     assert not (browser.browser_root() / "escape.txt").exists()
 
 
-def test_extension_refresh_keeps_an_installed_copy_without_network(home, monkeypatch):
+def test_an_installed_extension_that_differs_from_the_pin_is_replaced(home, monkeypatch, tmp_path):
     browser.extension_dir().mkdir(parents=True)
-    (browser.extension_dir() / "manifest.json").write_text(json.dumps({"version": "1.0.0"}))
-    monkeypatch.setattr(browser, "_download", lambda *a, **k: pytest.fail("downloaded without an upgrade request"))
-    assert browser.refresh_extension() == {"version": "1.0.0", "updated": False}
+    (browser.extension_dir() / "manifest.json").write_text(json.dumps({"version": "0.0.1"}))
+    archive = _zip(tmp_path / "v1.zip", {"manifest.json": (json.dumps({"version": "1.0.1"}), 0o644)})
+    urls = _pin(monkeypatch, archive)
+    assert browser.refresh_extension() == {"version": "1.0.1", "updated": True}
+    assert len(urls) == 1 and browser.extension_intact()
 
 
 def test_ensure_chrome_uses_only_the_installed_system_chrome(home, monkeypatch):

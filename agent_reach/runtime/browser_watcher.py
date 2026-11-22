@@ -57,8 +57,9 @@ def _launch_with_pipe(chrome: str, url: str, *, headless: bool = True):
 
 def _load_extension(conn) -> None:
     ext = browser.extension_dir()
-    if not (ext / "manifest.json").is_file():
-        print("OpenCLI extension missing; browser opened without it", file=sys.stderr, flush=True)
+    if not browser.extension_intact():
+        # Never load extension files that differ from the pinned release into the profile that holds logins.
+        print("OpenCLI extension missing or modified; browser opened without it", file=sys.stderr, flush=True)
         return
     reply = conn.call("Extensions.loadUnpacked", {"path": str(ext)}, timeout=60)
     if "result" in reply:

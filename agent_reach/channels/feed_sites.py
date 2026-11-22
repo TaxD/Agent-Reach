@@ -77,7 +77,7 @@ class MediumChannel(_FeedSite):
         return self._feed("tag/" + quote(name.lower(), safe=""), limit, timeout)
 
     def _user(self, *, name: str, limit: int, timeout: float) -> list:
-        if not re.fullmatch(r"@?[A-Za-z0-9._-]{1,60}", name) or ".." in name:
+        if not re.fullmatch(r"@?[A-Za-z0-9][A-Za-z0-9._-]{0,59}", name) or ".." in name:
             raise ReachError(BAD_INPUT, "name must be @username or a publication slug")
         return self._feed(quote(name, safe="@"), limit, timeout)
 

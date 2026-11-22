@@ -28,7 +28,6 @@ from agent_reach.runtime.result import (
     ReachError,
     make_item,
 )
-from agent_reach.runtime.run import http_request
 from agent_reach.utils.url import host_matches, normalize_public_http_url
 
 from .base import Channel
@@ -57,14 +56,11 @@ def get_bytes(url: str, timeout: float, *, max_bytes: int = MAX_JSON_BYTES, acce
     """GET a URL on a host the channel hard-codes. Never pass caller-chosen hosts here."""
     if not url.startswith("https://"):
         raise ReachError(BAD_INPUT, "only HTTPS endpoints are allowed")
-    if not urllib.request.getproxies():
-        # Direct connection: also pin every hop to public addresses, so an open
-        # redirect on a trusted site cannot point this machine at its own network.
-        return fetch_public(url, timeout, max_bytes=max_bytes, accept=accept)
-    # ponytail: behind a proxy the proxy resolves names, so hops cannot be pinned here.
-    body = http_request(url, timeout=timeout, headers={"Accept": accept, "User-Agent": _USER_AGENT},
-                        max_bytes=max_bytes)
-    return _gunzip(body, max_bytes)
+    # Direct connection: every hop is pinned to public addresses, so an open redirect
+    # on a trusted site cannot point this machine at its own network.
+    # ponytail: behind a proxy the proxy resolves names, so hops are validated by
+    # their literal host only; address pinning there needs a CONNECT-aware client.
+    return fetch_public(url, timeout, max_bytes=max_bytes, accept=accept, via_proxy=_proxy_configured())
 
 
 def get_json(url: str, timeout: float) -> Any:
@@ -76,18 +72,43 @@ def get_json(url: str, timeout: float) -> Any:
 
 # ── text ──
 
-_BLOCK_END_RE = re.compile(r"(?i)<br\s*/?>|</(?:p|li|div|h[1-6]|tr|pre|blockquote)>")
-_SCRIPT_RE = re.compile(r"(?is)<(script|style)\b[^>]*>.*?</\1\s*>")
-_TAG_RE = re.compile(r"<[^>]*>")
+_BLOCK_TAGS = frozenset(("br", "/p", "/li", "/div", "/h1", "/h2", "/h3", "/h4", "/h5", "/h6", "/tr", "/pre", "/blockquote"))
+_MAX_HTML_CHARS = 400_000
 
 
 def strip_html(text: object) -> str:
-    """Plain text from an HTML fragment. Output is still untrusted content, just without markup."""
-    s = _SCRIPT_RE.sub(" ", str(text or ""))
-    s = _BLOCK_END_RE.sub("\n", s)
-    s = html.unescape(_TAG_RE.sub("", s)).replace("]]>", "")
+    """Plain text from an HTML fragment, in one linear pass (no regex backtracking).
+
+    Output is still untrusted content, just without markup.
+    """
+    s = str(text or "")[:_MAX_HTML_CHARS]
+    low = s.lower()
+    out: list = []
+    i = 0
+    while True:
+        lt = s.find("<", i)
+        if lt < 0:
+            out.append(s[i:])
+            break
+        out.append(s[i:lt])
+        gt = s.find(">", lt + 1)
+        if gt < 0:
+            out.append(s[lt:])  # no closing ">" anywhere after: plain text, and we are done
+            break
+        name = s[lt + 1:gt].strip().split(" ", 1)[0].rstrip("/").lower()
+        i = gt + 1
+        if name in ("script", "style"):
+            end = low.find("</" + name, i)
+            close = s.find(">", end) if end >= 0 else -1
+            if close < 0:
+                break  # unterminated script/style: drop the rest
+            i = close + 1
+            out.append(" ")
+        elif name in _BLOCK_TAGS:
+            out.append("\n")
+    s = html.unescape("".join(out)).replace("]]>", "")
     s = re.sub(r"[ \t\r\f\v]+", " ", s)
-    return re.sub(r"\n\s*\n+", "\n\n", s).strip()
+    return re.sub(r"\n[ \n]*\n", "\n\n", s).strip()
 
 
 def clip(text: Optional[str], limit: int = MAX_ITEM_CHARS) -> Optional[str]:
@@ -112,6 +133,10 @@ def _iso_date(value: Optional[str]) -> Optional[str]:
         return value[:64]
 
 
+_ASCII_COMPATIBLE = (b"utf-8", b"utf8", b"us-ascii", b"ascii", b"iso-8859-1", b"latin-1", b"windows-1252")
+_PROLOG_RE = re.compile(rb"\s*(?:<\?.*?\?>|<!--.*?-->)?\s*", re.S)
+
+
 def parse_feed(body: bytes, limit: int, *, prefer_summary: bool = False) -> list:
     """Parse a feed into unified items.
 
@@ -121,10 +146,20 @@ def parse_feed(body: bytes, limit: int, *, prefer_summary: bool = False) -> list
     head = body[:4096]
     if b"\x00" in head or body[:2] in (b"\xff\xfe", b"\xfe\xff"):
         raise ReachError(UPSTREAM_BROKEN, "feed is not UTF-8/ASCII-compatible XML")
-    # A DTD (and the entities it declares) can only precede the root element.
-    root_at = re.search(rb"<[A-Za-z_]", body)
-    if re.search(rb"<!\s*(?:DOCTYPE|ENTITY)", body[:root_at.start() if root_at else len(body)], re.IGNORECASE):
-        raise ReachError(UPSTREAM_BROKEN, "feed declares a DTD or entities; refused")
+    declared = re.match(rb"\s*<\?xml[^>]*?encoding\s*=\s*[\"']([A-Za-z0-9._-]+)", body[:512].removeprefix(b"\xef\xbb\xbf"))
+    if declared and declared.group(1).lower() not in _ASCII_COMPATIBLE:
+        # The checks below read bytes; an EBCDIC-style encoding would hide markup from them.
+        raise ReachError(UPSTREAM_BROKEN, "feed uses an unsupported text encoding; refused")
+    # Walk the prolog properly (XML declaration, comments, processing instructions).
+    # The first other construct must be the root element; "<!" there is a DTD.
+    pos = 3 if body[:3] == b"\xef\xbb\xbf" else 0
+    while True:
+        skipped = _PROLOG_RE.match(body, pos)
+        if not skipped or skipped.end() == pos:
+            break
+        pos = skipped.end()
+    if body[pos:pos + 2] == b"<!" or not re.match(rb"<[A-Za-z_]", body[pos:pos + 2]):
+        raise ReachError(UPSTREAM_BROKEN, "feed declares a DTD or is not XML; refused")
     try:
         root = ET.fromstring(body)
     except ET.ParseError:
@@ -164,12 +199,12 @@ def parse_feed(body: bytes, limit: int, *, prefer_summary: bool = False) -> list
         if not link and guid and guid.startswith(("http://", "https://")):
             link = guid
         items.append(make_item(
-            title=strip_html(text_of("title")) or None,
-            url=link if link and link.startswith(("http://", "https://")) else None,
-            author=text_of("author", "creator"),
+            title=clip(strip_html(text_of("title")), 300) or None,
+            url=link if link and len(link) <= 2000 and link.startswith(("http://", "https://")) else None,
+            author=clip(text_of("author", "creator"), 100),
             published_at=_iso_date(text_of("published", "pubdate", "updated", "date")),
             text=clip(strip_html(text_of(*order))),
-            raw={"id": guid},
+            raw={"id": clip(guid, 300)},
         ))
         if len(items) >= limit:
             break
@@ -201,6 +236,27 @@ def _public_url(url: str) -> str:
     return clean
 
 
+#: IPv6 ranges that embed or translate an IPv4 address (NAT64, 6to4, Teredo) or are
+#: deprecated site-local space; `is_global` alone lets some of them through.
+_V6_REFUSED = tuple(ipaddress.ip_network(n) for n in (
+    "64:ff9b::/96", "64:ff9b:1::/48", "2002::/16", "2001::/32", "fec0::/10"))
+
+
+def is_public_unicast(address: str) -> bool:
+    """Only ordinary, globally routable unicast addresses count as public."""
+    try:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    if (not ip.is_global or ip.is_multicast or ip.is_reserved or ip.is_unspecified
+            or ip.is_loopback or ip.is_link_local or ip.is_private):
+        return False
+    return not (ip.version == 6 and any(ip in net for net in _V6_REFUSED))
+
+
 def _connect_public(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, **_kwargs):  # type: ignore[attr-defined]
     """socket.create_connection that connects only to globally routable addresses.
 
@@ -211,9 +267,7 @@ def _connect_public(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_addr
     host, port = address
     infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     for *_, sockaddr in infos:
-        ip = ipaddress.ip_address(str(sockaddr[0]).split("%", 1)[0])
-        mapped = getattr(ip, "ipv4_mapped", None)
-        if not (mapped or ip).is_global:
+        if not is_public_unicast(str(sockaddr[0])):
             raise ReachError(BAD_INPUT, "the address resolves to a non-public network; refused")
     last: Optional[OSError] = None
     for family, kind, proto, _, sockaddr in infos:
@@ -256,13 +310,22 @@ class _PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         _public_url(newurl)  # every hop is re-validated; non-http(s) schemes fail here
+        # urllib reads the whole redirect body right after this call. Close it first
+        # (read() on a closed response is empty) so a huge 3xx body cannot fill memory.
+        fp.close()
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 _FEED_ACCEPT = "application/atom+xml, application/rss+xml, application/xml, text/xml"
 
 
-def fetch_public(url: str, timeout: float, *, max_bytes: int = MAX_FEED_BYTES, accept: str = _FEED_ACCEPT) -> bytes:
+def _proxy_configured() -> bool:
+    """An outbound proxy for http(s) is set (a bare no_proxy list does not count)."""
+    return any(urllib.request.getproxies().get(scheme) for scheme in ("https", "http", "all"))
+
+
+def fetch_public(url: str, timeout: float, *, max_bytes: int = MAX_FEED_BYTES, accept: str = _FEED_ACCEPT,
+                 via_proxy: bool = False) -> bytes:
     """GET a caller-chosen URL without reaching loopback, private or link-local networks.
 
     ponytail: connects directly and ignores a configured proxy, because address
@@ -271,8 +334,10 @@ def fetch_public(url: str, timeout: float, *, max_bytes: int = MAX_FEED_BYTES, a
     """
     clean = _public_url(url)
     opener = urllib.request.OpenerDirector()
-    for handler in (urllib.request.ProxyHandler({}), _PublicHTTPHandler(), _PublicHTTPSHandler(),
-                    _PublicRedirectHandler(), urllib.request.HTTPDefaultErrorHandler(),
+    transport = ((urllib.request.ProxyHandler(), urllib.request.HTTPHandler(),
+                  urllib.request.HTTPSHandler(context=ssl.create_default_context())) if via_proxy
+                 else (urllib.request.ProxyHandler({}), _PublicHTTPHandler(), _PublicHTTPSHandler()))
+    for handler in (*transport, _PublicRedirectHandler(), urllib.request.HTTPDefaultErrorHandler(),
                     urllib.request.HTTPErrorProcessor()):
         opener.add_handler(handler)
     req = urllib.request.Request(clean, headers={"User-Agent": _USER_AGENT, "Accept": accept})

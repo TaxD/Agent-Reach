@@ -15,7 +15,7 @@ def test_missing_gh_auth_falls_back_to_public_api_without_login(monkeypatch):
         raise CommandFailed("UPSTREAM_BROKEN", "gh exited", stderr="please run gh auth login")
     monkeypatch.setattr(github, "run_cmd", no_gh)
     monkeypatch.setattr(github, "http_request", lambda *a, **k: json.dumps(
-        {"items": [{"full_name": "owner/repo", "html_url": "https://github.com/owner/repo"}]}
+        {"items": [{"full_name": "owner/repo", "html_url": "https://github.com/owner/repo", "private": False}]}
     ).encode())
     out = run_action(github.GitHubChannel(), "search", {"query": "repo", "limit": 1})
     assert out["ok"] and out["backend"] == "github-api" and len(out["items"]) == 1
@@ -47,6 +47,7 @@ def test_github_repository_without_readme_keeps_metadata(monkeypatch, backend):
         'full_name': 'example/code-only',
         'html_url': 'https://github.com/example/code-only',
         'description': 'A repository without a README',
+        'private': False,
     }
 
     def get(url, **kwargs):
@@ -80,7 +81,7 @@ def test_github_missing_repo_and_readme_failures_stay_errors(monkeypatch, status
         # A missing repository must not be mistaken for an optional missing README.
         if status == 404 or url.endswith('/readme'):
             raise urllib.error.HTTPError(url, status, 'Denied', headers, None)
-        return json.dumps({'full_name': 'example/code-only'}).encode()
+        return json.dumps({'full_name': 'example/code-only', 'private': False}).encode()
 
     monkeypatch.setattr(github, 'http_request', get)
     out = run_action(github.GitHubChannel(), 'read', {'target': 'example/code-only'}, only_backend='github-api')

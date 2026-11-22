@@ -101,7 +101,8 @@ def test_guarded_fetch_refuses_non_public_targets_before_any_connection(url, mon
     assert err.value.code == BAD_INPUT
 
 
-@pytest.mark.parametrize("answer", ["127.0.0.1", "10.1.2.3", "169.254.169.254", "::1", "fd00::1", "::ffff:127.0.0.1", "0.0.0.0"])
+@pytest.mark.parametrize("answer", ["127.0.0.1", "10.1.2.3", "169.254.169.254", "::1", "fd00::1", "::ffff:127.0.0.1", "0.0.0.0",
+                                    "224.0.0.1", "ff02::1", "fec0::1", "64:ff9b::7f00:1", "2002:7f00:1::", "100.64.0.1", "240.0.0.1"])
 def test_guarded_connect_refuses_names_that_resolve_to_private_addresses(answer, monkeypatch):
     family = socket.AF_INET6 if ":" in answer else socket.AF_INET
     monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(family, socket.SOCK_STREAM, 6, "", (answer, 80))])
@@ -125,6 +126,101 @@ def test_redirects_are_revalidated():
     for target in ("http://127.0.0.1/", "file:///etc/passwd", "https://example.org:22/"):
         with pytest.raises(ReachError):
             handler.redirect_request(None, None, 302, "Found", {}, target)
+
+
+def test_public_unicast_accepts_ordinary_addresses_only():
+    assert _public.is_public_unicast("93.184.216.34") and _public.is_public_unicast("2606:4700:4700::1111")
+    assert not _public.is_public_unicast("not-an-ip")
+
+
+def test_a_bare_no_proxy_list_does_not_disable_address_pinning(monkeypatch):
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {"no": "localhost,127.0.0.1"})
+    assert _public._proxy_configured() is False
+    monkeypatch.setattr(urllib.request, "getproxies", lambda: {"https": "http://127.0.0.1:7890"})
+    assert _public._proxy_configured() is True
+
+
+@pytest.mark.parametrize("payload", [
+    b'<?xml version="1.0"?><!-- <a --><!DOCTYPE r [<!ENTITY x "y">]><rss><channel><item><title>&x;</title></item></channel></rss>',
+    b'<?xml version="1.0"?><?pi <a ?><!DOCTYPE r [<!ENTITY x "y">]><rss><channel><item><title>&x;</title></item></channel></rss>',
+    b'<?xml version="1.0" encoding="cp037"?><rss/>',
+    b"\xef\xbb\xbf<!DOCTYPE r><rss/>",
+])
+def test_dtd_cannot_hide_behind_comments_instructions_or_encodings(payload):
+    with pytest.raises(ReachError) as err:
+        _public.parse_feed(payload, 5)
+    assert err.value.code == UPSTREAM_BROKEN
+
+
+def test_redirect_body_is_never_buffered():
+    class Body:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    import urllib.request
+
+    body = Body()
+    req = urllib.request.Request("https://example.org/feed")
+    _public._PublicRedirectHandler().redirect_request(req, body, 302, "Found", {}, "https://example.org/next")
+    assert body.closed
+
+
+def test_credentialed_requests_refuse_cross_origin_redirects():
+    import urllib.request
+
+    from agent_reach.runtime.run import _SameOriginRedirects
+
+    class Body:
+        def close(self):
+            pass
+
+    handler = _SameOriginRedirects("https://api.github.com/repos/a/b")
+    req = urllib.request.Request("https://api.github.com/repos/a/b", headers={"Authorization": "Bearer t"})
+    assert handler.redirect_request(req, Body(), 301, "Moved", {}, "https://api.github.com/repositories/1") is not None
+    for target in ("https://evil.example/x", "http://api.github.com/x", "https://api.github.com:8443/x"):
+        with pytest.raises(ReachError):
+            handler.redirect_request(req, Body(), 302, "Found", {}, target)
+
+
+def test_github_never_returns_private_repositories(monkeypatch):
+    import json
+
+    from agent_reach.channels import github
+    from agent_reach.runtime.result import NOT_FOUND
+
+    def get(path, timeout, accept=""):
+        if path.startswith("/search"):
+            assert "is%3Apublic" in path
+            return json.dumps({"items": [{"full_name": "me/secret", "private": True},
+                                         {"full_name": "me/open", "private": False}]}).encode()
+        return json.dumps({"full_name": "me/secret", "private": True}).encode()
+
+    assert [i["title"] for i in github.GitHubChannel._search(get, "x", 5, 3)] == ["me/open"]
+    for target in ("me/secret", "https://github.com/me/secret/issues/1"):
+        with pytest.raises(ReachError) as err:
+            github.GitHubChannel._read(get, target, 3)
+        assert err.value.code == NOT_FOUND
+
+
+def test_ytdlp_ignores_ambient_config_plugins_and_browser_cookies():
+    from agent_reach.channels.youtube import ytdlp_base_argv
+
+    argv = ytdlp_base_argv()
+    assert argv[1] == "-I"
+    assert {"--ignore-config", "--no-plugin-dirs", "--no-cookies-from-browser", "--no-cookies"} <= set(argv)
+
+
+def test_modified_extension_files_are_not_trusted(tmp_path, monkeypatch):
+    from agent_reach.runtime import browser
+
+    monkeypatch.setattr(browser, "extension_dir", lambda: tmp_path / "extension")
+    (tmp_path / "extension").mkdir()
+    (tmp_path / "extension" / "manifest.json").write_text('{"version": "1.0.27"}')
+    assert browser.extension_tree_digest() and not browser.extension_intact()
 
 
 def test_rss_failures_never_pause_the_channel_for_other_feeds(monkeypatch):
@@ -171,9 +267,13 @@ def test_trending_page_is_parsed():
     lambda: _package_name("../../-/v1/search"),
     lambda: _package_name("https://evil.example/package/react"),
     lambda: _package_name("React Native"),
+    lambda: DevToChannel()._read(target="https://dev.to/../api", timeout=1),
+    lambda: GitHubTrendingChannel()._list(language="..", since="daily", limit=1, timeout=1),
+    lambda: MediumChannel()._user(name=".", limit=1, timeout=1),
+    lambda: LobstersChannel()._tag(name="..", limit=1, timeout=1),
 ])
 def test_hostile_arguments_are_rejected_before_any_request(call, monkeypatch):
-    monkeypatch.setattr(_public, "http_request", lambda *a, **k: pytest.fail("must not send a request"))
+    monkeypatch.setattr(_public, "fetch_public", lambda *a, **k: pytest.fail("must not send a request"))
     with pytest.raises(ReachError) as err:
         call()
     assert err.value.code == BAD_INPUT

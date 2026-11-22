@@ -84,7 +84,7 @@ def test_rerunning_pip_setup_preserves_partial_environment(monkeypatch, tmp_path
     tools._install_pip(tool)
     assert marker.read_text() == "keep"
     assert len(calls) == 1
-    assert calls[0][0][:4] == [str(py), "-m", "pip", "install"]
+    assert calls[0][0][:5] == [str(py), "-I", "-m", "pip", "install"]
     assert calls[0][1]["stage"] == "sample:pip_packages"
     assert "sample-package==1.2.3" in calls[0][0]
 

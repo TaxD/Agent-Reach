@@ -287,6 +287,7 @@ def _run(argv, timeout: float = 600, env: Optional[dict] = None, *, stage: str =
     hint = f"Stage: {stage}; network: {proxy_mode}. Check this download path, then rerun setup; installed packages and download caches are reused."
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, env=run_env,
+                              cwd=os.path.expanduser("~"),  # installers never run from the agent's project folder
                               **windows_hidden_kwargs())
     except FileNotFoundError:
         raise ReachError(NEED_SETUP, f"{Path(argv[0]).name} is not installed") from None
@@ -318,11 +319,11 @@ def _install_pip(tool: Tool) -> None:
     # ponytail: keep a partial install so rerunning setup reuses its packages
     # and pip cache; venv repairs a missing interpreter in place.
     if not py.is_file():
-        _run([sys.executable, "-m", "venv", str(venv)], stage=f"{tool.name}:venv")
-    _run([str(py), "-m", "pip", "install", "--quiet", "--disable-pip-version-check", install_spec(tool)],
+        _run([sys.executable, "-I", "-m", "venv", str(venv)], stage=f"{tool.name}:venv")
+    _run([str(py), "-I", "-m", "pip", "install", "--quiet", "--disable-pip-version-check", install_spec(tool)],
          stage=f"{tool.name}:pip_packages")
     if tool.kind == "ffmpeg":
-        exe = _run([str(py), "-c", "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())"]).strip()
+        exe = _run([str(py), "-I", "-c", "import imageio_ffmpeg; print(imageio_ffmpeg.get_ffmpeg_exe())"]).strip()
         link = _private_bin(tool, "ffmpeg")
         link.parent.mkdir(parents=True, exist_ok=True)
         if link.exists() or link.is_symlink():

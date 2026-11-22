@@ -354,7 +354,7 @@ def _cmd_management(head: str, args: Sequence[str]) -> int:
     if head == "configure":
         value = ns.value
         if ns.stdin:
-            if sys.stdin.isatty() and ns.key.endswith("-key"):
+            if sys.stdin.isatty():
                 import getpass
 
                 value = getpass.getpass(f"{ns.key}: ").strip()
@@ -543,6 +543,19 @@ def _cmd_browser(args: Sequence[str]) -> int:
 
 
 def main(argv: Sequence[str]) -> int:
+    from agent_reach.config import ConfigError
+
+    try:
+        return _main(argv)
+    except ConfigError as exc:
+        # Config problems are reported as one JSON error, never as a traceback.
+        return _emit({"schema_version": SCHEMA_VERSION, "ok": False, "channel": None, "action": argv[0] if argv else None,
+                      "backend": None, "items": [], "meta": {"elapsed_ms": 0, "attempts": []},
+                      "error": {"code": NEED_SETUP, "message": str(exc),
+                                "hint": "Ask the user to fix or remove ~/.agent-reach/config.yaml. Do not print its contents."}})
+
+
+def _main(argv: Sequence[str]) -> int:
     global _SHOW_NOTICE
 
     if not argv or argv[0] in ("help", "-h", "--help"):

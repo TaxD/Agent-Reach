@@ -38,12 +38,23 @@ def ytdlp_tls_args() -> list:
     return []
 
 
+def ytdlp_base_argv() -> list:
+    """The bundled yt-dlp, isolated from everything ambient.
+
+    -I keeps a module in the working directory from shadowing yt_dlp. The yt-dlp
+    flags stop it from reading the user's own yt-dlp config and plugins, which
+    could otherwise make an ordinary read pull cookies out of a personal browser.
+    """
+    return [sys.executable, "-I", "-X", "utf8", "-m", "yt_dlp", "--ignore-config", "--no-plugin-dirs",
+            "--no-cookies-from-browser", "--no-cookies", *ytdlp_tls_args()]
+
+
 def _ytdlp_argv(*args: str) -> list:
     """Run the yt-dlp installed with Agent Reach (one of its dependencies)."""
     runtime = []
     if shutil.which("deno") is None and shutil.which("node"):
         runtime = ["--js-runtimes", "node"]
-    return [sys.executable, "-m", "yt_dlp", "--no-warnings", *ytdlp_tls_args(), *runtime, *args]
+    return [*ytdlp_base_argv(), "--no-warnings", *runtime, *args]
 
 
 def _video_url(target: str) -> str:

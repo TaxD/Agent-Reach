@@ -25,11 +25,13 @@ def _story(hit: dict) -> dict:
 
 
 def _flatten(node: dict, depth: int, out: list) -> None:
+    if depth > 30:
+        return
     for child in node.get("children") or []:
-        if len(out) >= _MAX_COMMENTS:
+        if len(out) >= _MAX_COMMENTS or not isinstance(child, dict):
             return
         if child.get("text"):
-            out.append(f"{'  ' * depth}@{child.get('author') or ''}: {strip_html(child['text'])}")
+            out.append(f"{'  ' * min(depth, 10)}@{child.get('author') or ''}: {strip_html(child['text'])}")
         _flatten(child, depth + 1, out)
 
 

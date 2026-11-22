@@ -75,7 +75,7 @@ class DevToChannel(Channel):
         else:
             url = t if "://" in t else "https://" + t
             parts = [p for p in urlsplit(url).path.split("/") if p]
-            if not self.can_handle(url) or len(parts) != 2 or not all(re.fullmatch(r"[\w.-]{1,200}", p) for p in parts):
+            if not self.can_handle(url) or len(parts) != 2 or not all(re.fullmatch(r"\w[\w.-]{0,199}", p) for p in parts):
                 raise ReachError(BAD_INPUT, "target must be an article id or a dev.to/<user>/<slug> link")
             path = "/".join(quote(p, safe="") for p in parts)
         data = get_json(f"{_API}/articles/{path}", timeout)

@@ -60,7 +60,7 @@ class GitHubTrendingChannel(Channel):
     def _list(self, *, language, since: str, limit: int, timeout: float) -> list:
         if since not in ("daily", "weekly", "monthly"):
             raise ReachError(BAD_INPUT, "since must be daily, weekly or monthly")
-        if language and not re.fullmatch(r"[A-Za-z0-9+#. -]{1,40}", str(language)):
+        if language and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9+#. -]{0,39}", str(language)):
             raise ReachError(BAD_INPUT, "language may contain only letters, digits, space and + # . -")
         slug = "/" + quote(str(language).strip().lower().replace(" ", "-"), safe="") if language else ""
         page = get_bytes(f"https://github.com/trending{slug}?since={since}", timeout, accept="text/html").decode("utf-8", "replace")

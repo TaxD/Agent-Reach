@@ -53,7 +53,7 @@ class LobstersChannel(Channel):
         return self._list("/newest.json", limit, timeout)
 
     def _tag(self, *, name: str, limit: int, timeout: float) -> list:
-        if not re.fullmatch(r"[A-Za-z0-9_+.-]{1,40}", name):
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_+.-]{0,39}", name):
             raise ReachError(BAD_INPUT, "tag name may contain only letters, digits and _ + . -")
         return self._list(f"/t/{quote(name.lower(), safe='')}.json", limit, timeout)
 
@@ -69,5 +69,7 @@ class LobstersChannel(Channel):
         for c in (data.get("comments") or [])[:100]:
             if not c.get("is_deleted"):
                 body = c.get("comment_plain") or strip_html(c.get("comment"))
-                lines.append(f"{'  ' * int(c.get('depth') or 0)}@{c.get('commenting_user') or ''}: {body}")
+                depth = c.get("depth")
+                indent = "  " * min(depth, 10) if isinstance(depth, int) and depth > 0 else ""
+                lines.append(f"{indent}@{c.get('commenting_user') or ''}: {body}")
         return [_story(data, "\n\n".join(x for x in lines if x))]
